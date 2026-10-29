@@ -1,0 +1,44 @@
+---
+description: 跨会话永久记忆：先问大脑再动手，结束时把结论写回
+alwaysApply: true
+---
+
+# 大脑优先
+
+用户要的是**关电脑、删软件也不丢**的记忆。本机大脑：`C:\benji\brain\`，默认 `http://127.0.0.1:18099`。
+
+换电脑或本机没有大脑时，不要找 Cursor 账号。信号命令是 **脑同步**：
+
+```
+python C:\benji\brain\sync_cursorrules.py pull
+```
+
+仓库：`git@github.com:mimaweimahan/cursorrules.git`（目录 `C:\benji\cursorrules`）。每天 23:50 任务 `BenjiBrainSync` 推送大脑和 Cursor 配置。用户说「脑同步」时先 pull 再 push。
+
+## 何时必须问
+
+涉及「以前做过 / 现网怎么配 / 踩过什么坑 / 该用哪个工具」时，先：
+
+```
+python C:\benji\brain\client.py context --task "一句话任务"
+```
+
+连不上就启动 `python C:\benji\brain\server.py`，不要假装有记忆。
+
+## 结束时必须写成常识
+
+对话过程丢掉。只留下**下次还能当常识用的短句**（可执行、可复述、不含密钥）：
+
+```
+python C:\benji\brain\client.py remember --kind common_sense --title "短标题" --body "常识：……所以下次……" --source "本会话" --salience 3
+```
+
+批量从 Cursor 历史提炼：`python C:\benji\brain\distill_commons.py`
+
+`kind`：常识用 `common_sense`；坑用 `pitfall`；架构决策用 `decision`。
+
+## 路由
+
+`python C:\benji\brain\client.py route "意图"` 给出用手还是用脚（cursor / openclaw / graphify / ale / shell）。成功后可 `success "技能名"` 给这条技能加分。
+
+读代码仍遵守 codebase-memory 规则；接口链路仍走 ALE。大脑管的是**人生记忆与工具选择**，不是 AST。

@@ -1,0 +1,26 @@
+---
+description: 读代码/追链路时优先使用 user-codebase-memory-mcp 知识图谱
+alwaysApply: true
+---
+
+# 代码探索：优先 Codebase Memory
+
+涉及「理解代码、找实现、追调用链、影响分析、摸架构」时，**优先**用 `user-codebase-memory-mcp`，不要一上来就 Grep/Glob 扫全库。
+
+## 必做流程
+
+1. `list_projects` — 确认目标仓库已索引
+2. 未索引或过期 → `index_repository`（`repo_path` = 仓库根；业务仓常用 `G:/xiangmu/ayang-tiktok`）
+3. 找符号/功能 → `search_graph`（自然语言用 `query`；精确名用 `name_pattern`）
+4. 追调用/跨服务 → `trace_path`（`inbound`/`outbound`；HTTP 用 `mode=cross_service`）
+5. 读实现 → `get_code_snippet`（先拿到 `qualified_name`）
+6. 文本/字段扫描 → `search_code`；改动影响 → `detect_changes`；总览 → `get_architecture`
+
+## 可跳过图谱的情况
+
+- 已知精确文件路径，只改几行
+- 纯运维/脚本/非业务仓（如本目录 LLM 网关脚本）且无索引价值
+
+## 与 ALE 配合
+
+接口链路任务：图谱定位符号与调用关系后，仍按 ALE 输出 Linkage Snapshot（Frontend → Route → Backend → Data Model）。

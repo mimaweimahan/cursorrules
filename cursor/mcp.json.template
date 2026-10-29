@@ -1,0 +1,42 @@
+{
+  "_README": "这是【未来要加的 MCP】的备份模板。需要时复制对应配置到 mcp.json 即可。",
+  "_INSTRUCTIONS": {
+    "github": "需要 GitHub PAT (https://github.com/settings/personal-access-tokens/new)，权限勾选 repo/issues/pull_requests/actions",
+    "mysql": "需要数据库连接信息，强烈建议用【只读账号】先连开发库",
+    "ssh": "暂未启用 - 推荐用 Cursor 内置终端 + SSH key 替代",
+    "memory": "可选 - 给 AI 长期项目记忆",
+    "sequential-thinking": "可选 - 让 AI 用链式思考排查复杂 bug"
+  },
+
+  "future_mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer REDACTED
+      }
+    },
+
+    "mysql": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@naganpm/mysql-mcp-server"],
+      "env": {
+        "MYSQL_HOST": "YOUR_DB_HOST",
+        "MYSQL_PORT": "3306",
+        "MYSQL_USER": "YOUR_DB_USER_READONLY",
+        "MYSQL_PASSWORD": "YOUR_DB_PASSWORD",
+        "MYSQL_DATABASE": "YOUR_DB_NAME"
+      }
+    },
+
+    "memory": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-memory"]
+    },
+
+    "sequential-thinking": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-sequential-thinking"]
+    }
+  }
+}

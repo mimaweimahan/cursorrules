@@ -1,0 +1,35 @@
+---
+description: 全局优先用 codebase-memory 图谱；无索引时提醒执行索引
+alwaysApply: true
+---
+
+# Codebase Memory（全局）
+
+凡涉及「定位代码 / 调用链 / 影响面 / 架构摸底」的任务，默认走 `codebase-memory-mcp`，不要无必要全库 Grep/Glob，也不要每个新会话默认全量索引。
+
+## 开场检查（简短）
+
+开始结构性工作前，用 MCP/`cli` 确认当前工作区是否已有索引（如 `list_projects`）：
+
+1. **已有对应项目索引** → 直接 `search_graph` / `trace_path` / `get_architecture` 等查图，再定点读文件。
+2. **没有代码图谱 / 当前项目未索引** → **立刻提醒用户**，并询问是否执行索引，例如：
+   > 当前项目尚未建立 codebase-memory 索引。是否现在执行 `index_repository`？
+   - 用户同意后再索引；**不要擅自全量索引**（除非用户明确说「索引这个项目」）。
+3. **索引损坏或明显过期且图查无结果** → 说明情况，建议增量/重建，仍先征得同意（用户已要求重建除外）。
+
+## 禁止
+
+- 新会话默认跑全量 `index_repository`
+- 有可用图谱时仍通读大量无关目录「摸项目」
+- 在用户未确认时删除索引或切换缓存根目录
+
+## 例外
+
+- 用户已给出确切文件路径
+- 纯文案/样式等无关结构的小改动
+- MCP 不可用时：说明不可用，再回退 Grep，并提醒检查 `codebase-memory-mcp` 与 `CBM_CACHE_DIR`
+
+## 本机缓存（参考）
+
+- 常用：`CBM_CACHE_DIR=G:/xiangmu/.codebase-memory-mcp`
+- 以实际环境变量与 `list_projects` 为准；`auto_watch` 负责开发期增量

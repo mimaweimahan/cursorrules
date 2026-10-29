@@ -1,0 +1,37 @@
+---
+description: 换电脑或换项目时去磁盘上的大脑要记忆，不要只翻 Cursor 聊天
+alwaysApply: true
+---
+
+# 大脑在哪
+
+记忆在磁盘上，不在 Cursor 账号里。接口是 `http://127.0.0.1:18099`，目录是 `C:\benji\brain\`（库文件 `data\brain.db`）。
+
+涉及「以前做过 / 现网怎么配 / 踩过什么坑 / 该用哪个工具」时，先：
+
+```
+python C:\benji\brain\client.py context --task "一句话任务"
+```
+
+连不上就运行 `python C:\benji\brain\keep.py`，不要假装有记忆。
+
+换了一台电脑，或本机没有 `C:\benji\brain\client.py`，或 `health` 失败：立刻执行信号命令 **脑同步**（先拉仓库里的大脑和配置，再启动）：
+
+```
+python C:\benji\brain\sync_cursorrules.py pull
+```
+
+仓库还没在本机时：
+
+```
+git clone git@github.com:mimaweimahan/cursorrules.git C:\benji\cursorrules
+python C:\benji\cursorrules\brain\sync_cursorrules.py pull
+```
+
+每天 23:50 计划任务 `BenjiBrainSync` 会把大脑和 Cursor 配置推回该仓库。用户说「脑同步」时：先 pull，再 push。不同账号则先把仓库里的 `cursor/user-rules` 放进 `%USERPROFILE%\.cursor\rules`，再对 Cursor 说「脑同步」。
+
+结束时把还能复用的短句写回去（不要写密钥）：
+
+```
+python C:\benji\brain\client.py remember --kind common_sense --title "短标题" --body "常识：……所以下次……" --source "本会话" --salience 3
+```
