@@ -158,6 +158,10 @@ def cmd_success(args):
     print(json.dumps(request("POST", "/v1/skill/success", body={"name": args.name}), ensure_ascii=False, indent=2))
 
 
+def cmd_reindex(_args):
+    print(json.dumps(request("POST", "/v1/reindex", body={}), ensure_ascii=False, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description="永久记忆库客户端")
     sub = parser.add_subparsers(dest="cmd")
@@ -196,6 +200,8 @@ def main():
     p_ok = sub.add_parser("success")
     p_ok.add_argument("name")
 
+    sub.add_parser("reindex")
+
     args = parser.parse_args()
     {
         "health": cmd_health,
@@ -205,6 +211,7 @@ def main():
         "route": cmd_route,
         "skill": cmd_skill,
         "success": cmd_success,
+        "reindex": cmd_reindex,
     }[args.cmd](args)
 
 

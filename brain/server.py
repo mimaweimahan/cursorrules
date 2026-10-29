@@ -1,10 +1,18 @@
 # -*- coding: utf-8 -*-
-"""本机/VPS 永久记忆库。标准库 + SQLite FTS5，不依赖向量库。"""
+"""本机/VPS 永久记忆库。标准库 + SQLite FTS5。
+
+模糊召回用可重建的向量索引（中文双字加英文词，按文档频率加权）。
+本机 Python 自带 SQLite 3.32，加载不了需要 3.41+ 的 sqlite-vec。
+向量只是索引，原文仍在 memories 表，删掉 memory_vec 会按原文重建。
+"""
 from __future__ import print_function
 
+import hashlib
 import json
+import math
 import os
 import sqlite3
+import struct
 import time
 from datetime import datetime
 
@@ -20,6 +28,8 @@ DB_PATH = os.environ.get("BRAIN_DB", os.path.join(ROOT, "data", "brain.db"))
 HOST = os.environ.get("BRAIN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("BRAIN_PORT", "18099"))
 TOKEN = os.environ.get("BRAIN_TOKEN", "").strip()
+VEC_DIM = 256
+VEC_KEEP = 0.55
 
 KINDS = (
     "common_sense",
@@ -90,6 +100,17 @@ def init_db(conn):
             INSERT INTO memories_fts(rowid, title, body, tags)
             VALUES (new.id, new.title, new.body, new.tags);
         END;
+        CREATE TABLE IF NOT EXISTS memory_vec (
+            id INTEGER PRIMARY KEY,
+            vec BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS brain_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS memories_vec_ad AFTER DELETE ON memories BEGIN
+            DELETE FROM memory_vec WHERE id=old.id;
+        END;
         CREATE TABLE IF NOT EXISTS skills (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
@@ -103,6 +124,7 @@ def init_db(conn):
     )
     conn.commit()
     seed_skills(conn)
+    ensure_vectors(conn)
 
 
 def seed_skills(conn):
@@ -148,6 +170,132 @@ def seed_skills(conn):
     conn.commit()
 
 
+def memory_tokens(text):
+    """英文词整段保留；中文切成双字。路径、IP、文件名因此仍是完整词。"""
+    text = (text or "").lower()
+    toks = []
+    buf = []
+
+    def flush():
+        if len(buf) >= 2:
+            toks.append("".join(buf))
+        del buf[:]
+
+    chars = []
+    for ch in text:
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9") or ch in "._/+-:":
+            buf.append(ch)
+            continue
+        flush()
+        if "\u4e00" <= ch <= "\u9fff":
+            chars.append(ch)
+    flush()
+    for i in range(len(chars) - 1):
+        toks.append(chars[i] + chars[i + 1])
+    if len(chars) == 1:
+        toks.append(chars[0])
+    return toks
+
+
+def embed_tokens(toks, weights, default=1.0):
+    vec = [0.0] * VEC_DIM
+    if not toks:
+        return vec
+    for tok in toks:
+        weight = weights.get(tok, default) if weights else 1.0
+        if weight == 0:
+            continue
+        digest = hashlib.sha256(tok.encode("utf-8")).digest()
+        bucket = int.from_bytes(digest[:4], "little") % VEC_DIM
+        sign = 1.0 if digest[4] & 1 else -1.0
+        vec[bucket] += sign * weight
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm == 0:
+        return vec
+    return [v / norm for v in vec]
+
+
+def pack_vec(vec):
+    return struct.pack("<%df" % len(vec), *vec)
+
+
+def unpack_vec(blob):
+    count = len(blob) // 4
+    return struct.unpack("<%df" % count, blob)
+
+
+def dot(left, right):
+    return sum(a * b for a, b in zip(left, right))
+
+
+def reindex_vectors(conn):
+    """按当前原文重建全部向量和词权重。索引可丢，原文不丢。"""
+    rows = conn.execute("SELECT id, title, body FROM memories").fetchall()
+    docs = []
+    df = {}
+    for row in rows:
+        text = ((row["title"] or "") + "\n") * 3 + (row["body"] or "")
+        toks = memory_tokens(text)
+        docs.append((row["id"], toks))
+        for tok in set(toks):
+            df[tok] = df.get(tok, 0) + 1
+    n = len(docs)
+    weights = {}
+    for tok, freq in df.items():
+        weights[tok] = math.log((n + 1.0) / (freq + 1.0)) + 1.0
+    default = math.log(n + 1.0) + 1.0
+    conn.execute("DELETE FROM memory_vec")
+    for mid, toks in docs:
+        blob = pack_vec(embed_tokens(toks, weights, default))
+        conn.execute("INSERT INTO memory_vec(id, vec) VALUES (?, ?)", (mid, sqlite3.Binary(blob)))
+    conn.execute(
+        "INSERT INTO brain_meta(key, value) VALUES('idf', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (json.dumps({"w": weights, "d": default}, ensure_ascii=False),),
+    )
+    conn.commit()
+    return {"ok": True, "count": n, "dim": VEC_DIM}
+
+
+def ensure_vectors(conn):
+    memories = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()["c"]
+    vectors = conn.execute("SELECT COUNT(*) AS c FROM memory_vec").fetchone()["c"]
+    if memories != vectors:
+        reindex_vectors(conn)
+
+
+def load_weights(conn):
+    row = conn.execute("SELECT value FROM brain_meta WHERE key='idf'").fetchone()
+    if not row:
+        return {}, 1.0
+    data = json.loads(row["value"])
+    return data.get("w") or {}, float(data.get("d") or 1.0)
+
+
+def vector_hits(conn, query, limit):
+    weights, default = load_weights(conn)
+    if not weights:
+        return []
+    query_vec = embed_tokens(memory_tokens(query), weights, default)
+    if not any(query_vec):
+        return []
+    scored = []
+    for row in conn.execute("SELECT id, vec FROM memory_vec"):
+        scored.append((row["id"], dot(query_vec, unpack_vec(row["vec"]))))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    if not scored or scored[0][1] <= 0:
+        return []
+    best = scored[0][1]
+    kept = []
+    for mid, score in scored:
+        if score < best * VEC_KEEP:
+            break
+        kept.append((mid, score))
+        if len(kept) >= limit:
+            break
+    return kept
+
+
 def row_mem(row):
     return {
         "id": row["id"],
@@ -183,6 +331,7 @@ def upsert_memory(conn, kind, title, body, source, salience=1.0, tags=""):
             (title[:180], body[:8000], tags, float(salience), ts, row["id"]),
         )
         conn.commit()
+        reindex_vectors(conn)
         saved = conn.execute("SELECT * FROM memories WHERE id=?", (row["id"],)).fetchone()
         return row_mem(saved)
     return remember(conn, {
@@ -252,6 +401,7 @@ def remember(conn, payload):
         (kind, title, body, source, tags, salience, ts, ts),
     )
     conn.commit()
+    reindex_vectors(conn)
     row = conn.execute("SELECT * FROM memories WHERE id=?", (cur.lastrowid,)).fetchone()
     return row_mem(row)
 
@@ -293,7 +443,34 @@ def recall(conn, query, limit=8, kind=None):
             "ORDER BY salience DESC, id DESC LIMIT ?" % extra,
             like_args,
         ).fetchall()
-    return [row_mem(r) for r in rows]
+    found = [row_mem(r) for r in rows]
+    seen = set(item["id"] for item in found)
+    if len(found) < limit:
+        for mid, _score in vector_hits(conn, query, limit):
+            if mid in seen:
+                continue
+            if kind:
+                row = conn.execute(
+                    "SELECT * FROM memories WHERE id=? AND kind=?", (mid, kind)
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT * FROM memories WHERE id=?", (mid,)).fetchone()
+            if not row:
+                continue
+            found.append(row_mem(row))
+            seen.add(mid)
+            if len(found) >= limit:
+                break
+    bump_ids = [item["id"] for item in found if item["kind"] != "episode"]
+    if bump_ids:
+        marks = ",".join("?" for _ in bump_ids)
+        conn.execute(
+            "UPDATE memories SET salience=MIN(5.0, salience+0.1), updated_at=? "
+            "WHERE id IN (%s) AND kind!='episode'" % marks,
+            [now_iso()] + bump_ids,
+        )
+        conn.commit()
+    return found
 
 
 def upsert_skill(conn, payload):
@@ -411,7 +588,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/health":
                 n = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()["c"]
-                return self._send(200, {"ok": True, "memories": n, "db": DB_PATH})
+                v = conn.execute("SELECT COUNT(*) AS c FROM memory_vec").fetchone()["c"]
+                return self._send(200, {"ok": True, "memories": n, "vectors": v, "db": DB_PATH})
             if path == "/v1/recall":
                 items = recall(
                     conn,
@@ -444,6 +622,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, remember(conn, payload))
             if path == "/v1/session":
                 return self._send(200, record_session(conn, payload))
+            if path == "/v1/reindex":
+                return self._send(200, reindex_vectors(conn))
             if path == "/v1/skill":
                 return self._send(200, upsert_skill(conn, payload))
             if path == "/v1/skill/success":
