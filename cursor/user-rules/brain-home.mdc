@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 大脑在哪
 
-记忆在磁盘上，不在 Cursor 账号里。接口是 `http://127.0.0.1:18099`，目录是 `C:\benji\brain\`（库文件 `data\brain.db`）。模糊说法走向量索引，路径、IP、文件名仍走全文。向量由原文重建，不另存模型。
+记忆在磁盘上，不在 Cursor 账号里。接口是 `http://127.0.0.1:18099`，目录是 `C:\benji\brain\`（库文件 `data\brain.db`）。模糊说法走向量索引，路径、IP、文件名仍走全文。向量由原文重建。本机有 `C:\benji\brain\models\bge-small-zh-v1.5` 时用句向量，没有就退回词向量。模型不进仓库，新机器需要时运行 `python C:\benji\brain\fetch_embed.py`。
 
 用户钩子 `%USERPROFILE%\.cursor\hooks.json` 会在每场会话开始时注入已有记忆，并在回合结束时把原文写入大脑、蒸馏成一条短句。新机器 `pull` 时会把这份钩子装回去。
 

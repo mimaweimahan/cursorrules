@@ -16,6 +16,8 @@ import struct
 import time
 from datetime import datetime
 
+import vectors
+
 try:
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import parse_qs, urlparse
@@ -29,7 +31,6 @@ HOST = os.environ.get("BRAIN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("BRAIN_PORT", "18099"))
 TOKEN = os.environ.get("BRAIN_TOKEN", "").strip()
 VEC_DIM = 256
-VEC_KEEP = 0.55
 
 KINDS = (
     "common_sense",
@@ -228,15 +229,62 @@ def dot(left, right):
     return sum(a * b for a, b in zip(left, right))
 
 
+def memory_text(title, body):
+    return ((title or "") + "\n") * 3 + (body or "")
+
+
+def meta_get(conn, key):
+    row = conn.execute("SELECT value FROM brain_meta WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else ""
+
+
+def meta_set(conn, key, value):
+    conn.execute(
+        "INSERT INTO brain_meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+
+
+def active_engine():
+    return "bge" if vectors.model_ready() else "hash"
+
+
+def embed_document(title, body, weights, default):
+    text = memory_text(title, body)
+    if active_engine() == "bge":
+        neural = vectors.embed(text, False)
+        if neural:
+            return neural
+    return embed_tokens(memory_tokens(text), weights, default)
+
+
+def embed_query(query, weights, default):
+    if active_engine() == "bge":
+        neural = vectors.embed(query, True)
+        if neural:
+            return neural
+    toks = memory_tokens(query)
+    known = [tok for tok in toks if tok in weights]
+    return embed_tokens(known or toks, weights, default)
+
+
+def save_vec(conn, mid, vec):
+    conn.execute(
+        "INSERT INTO memory_vec(id, vec) VALUES (?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET vec=excluded.vec",
+        (mid, sqlite3.Binary(pack_vec(vec))),
+    )
+
+
 def reindex_vectors(conn):
-    """按当前原文重建全部向量和词权重。索引可丢，原文不丢。"""
+    """按当前原文重建全部向量。索引可丢，原文不丢。"""
     rows = conn.execute("SELECT id, title, body FROM memories").fetchall()
     docs = []
     df = {}
     for row in rows:
-        text = ((row["title"] or "") + "\n") * 3 + (row["body"] or "")
-        toks = memory_tokens(text)
-        docs.append((row["id"], toks))
+        toks = memory_tokens(memory_text(row["title"], row["body"]))
+        docs.append(row)
         for tok in set(toks):
             df[tok] = df.get(tok, 0) + 1
     n = len(docs)
@@ -245,50 +293,62 @@ def reindex_vectors(conn):
         weights[tok] = math.log((n + 1.0) / (freq + 1.0)) + 1.0
     default = math.log(n + 1.0) + 1.0
     conn.execute("DELETE FROM memory_vec")
-    for mid, toks in docs:
-        blob = pack_vec(embed_tokens(toks, weights, default))
-        conn.execute("INSERT INTO memory_vec(id, vec) VALUES (?, ?)", (mid, sqlite3.Binary(blob)))
-    conn.execute(
-        "INSERT INTO brain_meta(key, value) VALUES('idf', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (json.dumps({"w": weights, "d": default}, ensure_ascii=False),),
-    )
+    for row in docs:
+        vec = embed_document(row["title"], row["body"], weights, default)
+        save_vec(conn, row["id"], vec)
+    meta_set(conn, "idf", json.dumps({"w": weights, "d": default}, ensure_ascii=False))
+    engine = active_engine()
+    meta_set(conn, "engine", engine)
     conn.commit()
-    return {"ok": True, "count": n, "dim": VEC_DIM}
+    dim = len(embed_document(docs[0]["title"], docs[0]["body"], weights, default)) if docs else 0
+    return {"ok": True, "count": n, "dim": dim, "engine": engine}
 
 
 def ensure_vectors(conn):
     memories = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()["c"]
-    vectors = conn.execute("SELECT COUNT(*) AS c FROM memory_vec").fetchone()["c"]
-    if memories != vectors:
+    stored = conn.execute("SELECT COUNT(*) AS c FROM memory_vec").fetchone()["c"]
+    if memories != stored or meta_get(conn, "engine") != active_engine():
         reindex_vectors(conn)
 
 
 def load_weights(conn):
-    row = conn.execute("SELECT value FROM brain_meta WHERE key='idf'").fetchone()
-    if not row:
+    raw = meta_get(conn, "idf")
+    if not raw:
         return {}, 1.0
-    data = json.loads(row["value"])
+    data = json.loads(raw)
     return data.get("w") or {}, float(data.get("d") or 1.0)
+
+
+def index_one(conn, mid, title, body):
+    weights, default = load_weights(conn)
+    save_vec(conn, mid, embed_document(title, body, weights, default))
+    if meta_get(conn, "engine") != active_engine():
+        meta_set(conn, "engine", active_engine())
+    conn.commit()
 
 
 def vector_hits(conn, query, limit):
     weights, default = load_weights(conn)
-    if not weights:
+    query_vec = embed_query(query, weights, default)
+    if not query_vec or not any(query_vec):
         return []
-    query_vec = embed_tokens(memory_tokens(query), weights, default)
-    if not any(query_vec):
-        return []
+    dim = len(query_vec)
+    engine = meta_get(conn, "engine") or active_engine()
+    floor = 0.48 if engine == "bge" else 0.18
+    keep = 0.83 if engine == "bge" else 0.85
     scored = []
     for row in conn.execute("SELECT id, vec FROM memory_vec"):
-        scored.append((row["id"], dot(query_vec, unpack_vec(row["vec"]))))
+        blob = unpack_vec(row["vec"])
+        if len(blob) != dim:
+            continue
+        scored.append((row["id"], dot(query_vec, blob)))
     scored.sort(key=lambda item: item[1], reverse=True)
-    if not scored or scored[0][1] <= 0:
+    if not scored or scored[0][1] < floor:
         return []
     best = scored[0][1]
     kept = []
     for mid, score in scored:
-        if score < best * VEC_KEEP:
+        if score < floor or score < best * keep:
             break
         kept.append((mid, score))
         if len(kept) >= limit:
@@ -331,7 +391,7 @@ def upsert_memory(conn, kind, title, body, source, salience=1.0, tags=""):
             (title[:180], body[:8000], tags, float(salience), ts, row["id"]),
         )
         conn.commit()
-        reindex_vectors(conn)
+        index_one(conn, row["id"], title[:180], body[:8000])
         saved = conn.execute("SELECT * FROM memories WHERE id=?", (row["id"],)).fetchone()
         return row_mem(saved)
     return remember(conn, {
@@ -401,7 +461,7 @@ def remember(conn, payload):
         (kind, title, body, source, tags, salience, ts, ts),
     )
     conn.commit()
-    reindex_vectors(conn)
+    index_one(conn, cur.lastrowid, title, body)
     row = conn.execute("SELECT * FROM memories WHERE id=?", (cur.lastrowid,)).fetchone()
     return row_mem(row)
 
@@ -589,7 +649,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/health":
                 n = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()["c"]
                 v = conn.execute("SELECT COUNT(*) AS c FROM memory_vec").fetchone()["c"]
-                return self._send(200, {"ok": True, "memories": n, "vectors": v, "db": DB_PATH})
+                engine = meta_get(conn, "engine") or active_engine()
+                return self._send(200, {"ok": True, "memories": n, "vectors": v, "engine": engine, "db": DB_PATH})
             if path == "/v1/recall":
                 items = recall(
                     conn,

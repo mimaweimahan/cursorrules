@@ -32,6 +32,8 @@ BRAIN_FILES = (
     "brain.service",
     "openclaw-brain.md",
     "deploy_vps.py",
+    "vectors.py",
+    "fetch_embed.py",
 )
 SECRET_RE = re.compile(
     r"ghp_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9]{10,}|"
