@@ -13,7 +13,7 @@ git clone git@github.com:mimaweimahan/cursorrules.git C:\benji\cursorrules
 python C:\benji\cursorrules\brain\sync_cursorrules.py pull
 ```
 
-pull 会把大脑放到 `C:\benji\brain`，把规则放到 `%USERPROFILE%\.cursor\rules`，并检查 `http://127.0.0.1:18099`。
+pull 会把大脑放到 `C:\benji\brain`，把规则放到 `%USERPROFILE%\.cursor\rules`，把 code-profile 放到 `C:\benji\cursor-profiles`。在 Cursor 里用 Profiles: Import 导入该文件。
 
 ## 不同账号
 

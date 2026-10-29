@@ -154,8 +154,32 @@ def export_bundle():
             text = redact_text(handle.read())
         with open(os.path.join(cursor_out, "mcp.json.template"), "w", encoding="utf-8") as handle:
             handle.write(text)
+    export_profiles(cursor_out)
     write_readme()
     write_gitignore()
+
+
+def profile_sources():
+    found = []
+    for folder in (
+        os.path.join(USERPROFILE, "Desktop"),
+        os.path.join(USERPROFILE, "Documents"),
+        r"C:\benji",
+        os.path.join(r"C:\benji", "cursor-profiles"),
+    ):
+        if not os.path.isdir(folder):
+            continue
+        for name in os.listdir(folder):
+            if name.endswith(".code-profile"):
+                found.append(os.path.join(folder, name))
+    return found
+
+
+def export_profiles(cursor_out):
+    dest_dir = os.path.join(cursor_out, "profiles")
+    reset_dir(dest_dir)
+    for src in profile_sources():
+        copy_file(src, os.path.join(dest_dir, os.path.basename(src)))
 
 
 def write_gitignore():
@@ -182,7 +206,7 @@ git clone git@github.com:mimaweimahan/cursorrules.git C:\\benji\\cursorrules
 python C:\\benji\\cursorrules\\brain\\sync_cursorrules.py pull
 ```
 
-pull 会把大脑放到 `C:\\benji\\brain`，把规则放到 `%USERPROFILE%\\.cursor\\rules`，并检查 `http://127.0.0.1:18099`。
+pull 会把大脑放到 `C:\\benji\\brain`，把规则放到 `%USERPROFILE%\\.cursor\\rules`，把 code-profile 放到 `C:\\benji\\cursor-profiles`。在 Cursor 里用 Profiles: Import 导入该文件。
 
 ## 不同账号
 
@@ -302,6 +326,7 @@ def pull():
     if os.path.isfile(mcp_src) and not os.path.isfile(mcp_dest):
         copy_file(mcp_src, mcp_dest)
         log("wrote redacted mcp.json; fill tokens locally")
+    restore_profiles()
     ensure_daily_task()
     try:
         if BRAIN not in sys.path:
@@ -311,6 +336,24 @@ def pull():
     except Exception as exc:
         log("keep task: " + str(exc))
     log("pull done")
+
+
+def restore_profiles():
+    src_dir = os.path.join(REPO, "cursor", "profiles")
+    if not os.path.isdir(src_dir):
+        return
+    dest_dir = os.path.join(r"C:\benji", "cursor-profiles")
+    if not os.path.isdir(dest_dir):
+        os.makedirs(dest_dir)
+    desktop = os.path.join(USERPROFILE, "Desktop")
+    for name in os.listdir(src_dir):
+        if not name.endswith(".code-profile"):
+            continue
+        src = os.path.join(src_dir, name)
+        copy_file(src, os.path.join(dest_dir, name))
+        if os.path.isdir(desktop):
+            copy_file(src, os.path.join(desktop, name))
+        log("restored profile " + name)
 
 
 def ensure_daily_task():
