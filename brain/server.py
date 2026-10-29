@@ -162,6 +162,78 @@ def row_mem(row):
     }
 
 
+def upsert_memory(conn, kind, title, body, source, salience=1.0, tags=""):
+    title = (title or "").strip()
+    body = (body or "").strip()
+    source = (source or "").strip()
+    if not title or not body:
+        raise ValueError("title 和 body 必填")
+    if kind not in KINDS:
+        kind = "episode"
+    ts = now_iso()
+    row = None
+    if source:
+        row = conn.execute(
+            "SELECT id FROM memories WHERE kind=? AND source=?",
+            (kind, source),
+        ).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE memories SET title=?, body=?, tags=?, salience=?, updated_at=? WHERE id=?",
+            (title[:180], body[:8000], tags, float(salience), ts, row["id"]),
+        )
+        conn.commit()
+        saved = conn.execute("SELECT * FROM memories WHERE id=?", (row["id"],)).fetchone()
+        return row_mem(saved)
+    return remember(conn, {
+        "kind": kind,
+        "title": title[:180],
+        "body": body[:8000],
+        "source": source,
+        "tags": tags,
+        "salience": salience,
+    })
+
+
+def record_session(conn, payload):
+    """一场会话的原文档案，外加一条可复用短句。同一 session 反复调用会覆盖，不堆重复。"""
+    sid = (payload.get("session_id") or "").strip() or "unknown"
+    prompts = [p.strip() for p in (payload.get("prompts") or []) if isinstance(p, str) and p.strip()]
+    responses = [p.strip() for p in (payload.get("responses") or []) if isinstance(p, str) and p.strip()]
+    if not prompts and not responses:
+        return {"ok": True, "skipped": True}
+    lines = []
+    turns = max(len(prompts), len(responses))
+    for i in range(turns):
+        if i < len(prompts):
+            lines.append("用户: " + prompts[i][:1500])
+        if i < len(responses):
+            lines.append("回复: " + responses[i][:1500])
+    body = "\n".join(lines)[:8000]
+    title = (prompts[0] if prompts else "会话 " + sid[:8])[:80]
+    episode = upsert_memory(
+        conn, "episode", title, body, "session:" + sid, salience=1.0, tags="session",
+    )
+    distilled = None
+    last = responses[-1] if responses else ""
+    if prompts and len(last) >= 40 and len(prompts[0]) >= 4:
+        kind = "decision"
+        if "坑" in last[:80] or "不要" in last[:40]:
+            kind = "pitfall"
+        elif last.startswith("常识"):
+            kind = "common_sense"
+        distilled = upsert_memory(
+            conn,
+            kind,
+            title,
+            last[:700],
+            "distill:" + sid,
+            salience=2.0,
+            tags="distill",
+        )
+    return {"ok": True, "episode_id": episode["id"], "distill_id": distilled["id"] if distilled else None}
+
+
 def remember(conn, payload):
     kind = (payload.get("kind") or "fact").strip()
     if kind not in KINDS:
@@ -370,6 +442,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._body()
             if path == "/v1/remember":
                 return self._send(200, remember(conn, payload))
+            if path == "/v1/session":
+                return self._send(200, record_session(conn, payload))
             if path == "/v1/skill":
                 return self._send(200, upsert_skill(conn, payload))
             if path == "/v1/skill/success":

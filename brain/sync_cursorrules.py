@@ -134,6 +134,12 @@ def export_bundle():
     workspace_rules = os.path.join(r"C:\benji", ".cursor", "rules")
     copy_tree(workspace_rules, os.path.join(REPO, "cursor", "workspace-rules"))
     copy_tree(os.path.join(CURSOR_USER, "skills"), os.path.join(REPO, "cursor", "skills"))
+    hooks_src = os.path.join(CURSOR_USER, "hooks")
+    if os.path.isdir(hooks_src):
+        copy_tree(hooks_src, os.path.join(REPO, "cursor", "hooks"))
+    hooks_json = os.path.join(CURSOR_USER, "hooks.json")
+    if os.path.isfile(hooks_json):
+        copy_file(hooks_json, os.path.join(REPO, "cursor", "hooks.json"))
 
     cursor_out = os.path.join(REPO, "cursor")
     if not os.path.isdir(cursor_out):
@@ -313,6 +319,10 @@ def pull():
             log("kept newer local brain.db")
     copy_into(os.path.join(REPO, "cursor", "user-rules"), os.path.join(CURSOR_USER, "rules"))
     copy_into(os.path.join(REPO, "cursor", "skills"), os.path.join(CURSOR_USER, "skills"))
+    copy_into(os.path.join(REPO, "cursor", "hooks"), os.path.join(CURSOR_USER, "hooks"))
+    hooks_json = os.path.join(REPO, "cursor", "hooks.json")
+    if os.path.isfile(hooks_json):
+        copy_file(hooks_json, os.path.join(CURSOR_USER, "hooks.json"))
     workspace = os.path.join(r"C:\benji", ".cursor", "rules")
     copy_into(os.path.join(REPO, "cursor", "workspace-rules"), workspace)
     if not os.path.isdir(CURSOR_APPDATA):

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "hooks/brain.cmd sessionStart",
+        "timeout": 15
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "hooks/brain.cmd prompt",
+        "timeout": 8
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "hooks/brain.cmd response",
+        "timeout": 8
+      }
+    ],
+    "stop": [
+      {
+        "command": "hooks/brain.cmd stop",
+        "timeout": 20
+      }
+    ]
+  }
+}
