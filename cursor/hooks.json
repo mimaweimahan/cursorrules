@@ -28,7 +28,8 @@
     "stop": [
       {
         "command": "hooks/brain.cmd stop",
-        "timeout": 20
+        "timeout": 20,
+        "loop_limit": 1
       }
     ]
   }

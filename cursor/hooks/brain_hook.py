@@ -194,6 +194,9 @@ def promo_roles(prompt):
     return paths
 
 
+FOLLOWUP_MARK = u"【先读角色】"
+
+
 def on_prompt(payload):
     sid = session_id(payload) or current_id() or "session"
     prompt = payload.get("prompt") or payload.get("text") or ""
@@ -201,9 +204,12 @@ def on_prompt(payload):
         state = load_state(sid)
         state["prompts"].append(clip(prompt, 1500))
         state["prompts"] = state["prompts"][-30:]
-        roles = promo_roles(prompt)
+        text = clean(prompt).strip()
+        roles = promo_roles(text)
         if roles:
             state["pending_roles"] = roles
+        elif not text.startswith(FOLLOWUP_MARK):
+            state["pending_roles"] = []
         save_state(state)
         set_current(sid)
     emit({"continue": True})
@@ -258,6 +264,25 @@ def on_response(payload):
     emit({})
 
 
+def role_followup(state, payload):
+    """没读完角色就结束时，自动补一句。只补一次，避免来回循环。"""
+    pending = [path for path in (state.get("pending_roles") or []) if os.path.isfile(path)]
+    if not pending:
+        return ""
+    try:
+        loop_count = int(payload.get("loop_count") or 0)
+    except (TypeError, ValueError):
+        loop_count = 0
+    if loop_count >= 1:
+        state["pending_roles"] = []
+        save_state(state)
+        return ""
+    return (
+        FOLLOWUP_MARK + "上一轮还没读完指定文件。现在只用 Read 依次打开下面每个文件的全文。"
+        "读完后，再按用户原来的问题作答。读完之前不要写方案。\n" + "\n".join(pending)
+    )
+
+
 def on_stop(payload):
     if payload.get("status") not in (None, "", "completed"):
         emit({})
@@ -269,6 +294,10 @@ def on_stop(payload):
     state = load_state(sid)
     if not state["prompts"] and not state["responses"]:
         emit({})
+        return
+    followup = role_followup(state, payload)
+    if followup:
+        emit({"followup_message": followup})
         return
     try:
         http_json("POST", "/v1/session", {
