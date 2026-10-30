@@ -197,6 +197,29 @@ def promo_roles(prompt):
 FOLLOWUP_MARK = u"【先读角色】"
 
 
+def role_bundle(paths):
+    parts = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                body = handle.read().strip()
+        except Exception:
+            body = ""
+        if body:
+            parts.append("## " + os.path.basename(path) + "\n" + body)
+    return "\n\n".join(parts)
+
+
+def deliver_roles(paths):
+    bundle = role_bundle(paths)
+    if not bundle:
+        bundle = "\n".join(paths)
+    return (
+        "下面是必须遵守的角色全文。按这些角色回答用户原来的问题，并继续查网站。"
+        "不要写一份没用到这些角色的泛泛方案。\n\n" + bundle
+    )
+
+
 def on_prompt(payload):
     sid = session_id(payload) or current_id() or "session"
     prompt = payload.get("prompt") or payload.get("text") or ""
@@ -205,11 +228,16 @@ def on_prompt(payload):
         state["prompts"].append(clip(prompt, 1500))
         state["prompts"] = state["prompts"][-30:]
         text = clean(prompt).strip()
-        roles = promo_roles(text)
-        if roles:
-            state["pending_roles"] = roles
-        elif not text.startswith(FOLLOWUP_MARK):
-            state["pending_roles"] = []
+        # 补句里夹着角色全文，会再次命中推广关键词。先认标记，避免把拦截又装回去。
+        if text.startswith(FOLLOWUP_MARK):
+            pass
+        else:
+            roles = promo_roles(text)
+            if roles:
+                state["pending_roles"] = roles
+                state["roles_delivered"] = False
+            else:
+                state["pending_roles"] = []
         save_state(state)
         set_current(sid)
     emit({"continue": True})
@@ -242,14 +270,18 @@ def on_pre_tool(payload):
         if os.path.basename(path).lower() in folded:
             continue
         kept.append(path)
-    state["pending_roles"] = kept
-    save_state(state)
     if not kept or len(kept) < len(pending):
+        state["pending_roles"] = kept
+        save_state(state)
         emit({"permission": "allow"})
         return
+    # 路径拦不住「不读就写」。把角色全文放进这次拒绝，并放开后面的工具，角色才进得了回答。
+    state["pending_roles"] = []
+    state["roles_delivered"] = True
+    save_state(state)
     emit({
         "permission": "deny",
-        "agent_message": "这是推广、引流或获客问题。先用 Read 读完下面的角色全文，再查网站或写方案：\n" + "\n".join(kept),
+        "agent_message": deliver_roles(kept),
     })
 
 
@@ -265,7 +297,9 @@ def on_response(payload):
 
 
 def role_followup(state, payload):
-    """没读完角色就结束时，自动补一句。只补一次，避免来回循环。"""
+    """一个工具都没调用就结束时，把角色全文补进下一条消息。只补一次。"""
+    if state.get("roles_delivered"):
+        return ""
     pending = [path for path in (state.get("pending_roles") or []) if os.path.isfile(path)]
     if not pending:
         return ""
@@ -273,14 +307,12 @@ def role_followup(state, payload):
         loop_count = int(payload.get("loop_count") or 0)
     except (TypeError, ValueError):
         loop_count = 0
+    state["pending_roles"] = []
+    state["roles_delivered"] = True
+    save_state(state)
     if loop_count >= 1:
-        state["pending_roles"] = []
-        save_state(state)
         return ""
-    return (
-        FOLLOWUP_MARK + "上一轮还没读完指定文件。现在只用 Read 依次打开下面每个文件的全文。"
-        "读完后，再按用户原来的问题作答。读完之前不要写方案。\n" + "\n".join(pending)
-    )
+    return FOLLOWUP_MARK + deliver_roles(pending)
 
 
 def on_stop(payload):
