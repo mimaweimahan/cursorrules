@@ -13,6 +13,12 @@
         "timeout": 8
       }
     ],
+    "preToolUse": [
+      {
+        "command": "hooks/brain.cmd preTool",
+        "timeout": 8
+      }
+    ],
     "afterAgentResponse": [
       {
         "command": "hooks/brain.cmd response",

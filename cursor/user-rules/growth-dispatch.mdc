@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 推广先读角色
 
-用户要推广、引流、获客、让客户找到、SEO、上架或私域时，先读 `%USERPROFILE%\.cursor\rules\` 里对应的 `.mdc` 全文，再写方案。不要把「没调用子代理」当成没使用这些角色。
+用户要推广、引流、获客、让客户找到、SEO、上架或私域时，先读 `%USERPROFILE%\.cursor\rules\` 里对应的 `.mdc` 全文，再写方案。钩子会拒绝其他工具，直到 `growth-hacker.mdc`、`baidu-seo-specialist.mdc`、`private-domain-operator.mdc` 被读过。不要把「没调用子代理」当成没使用这些角色。
 
 - 引进来：`growth-hacker.mdc`、`offer-lead-gen-strategist.mdc`、`private-domain-operator.mdc`
 - 被搜到、内容推出去：`baidu-seo-specialist.mdc`、`douyin-strategist.mdc`、`xiaohongshu-specialist.mdc`、`wechat-official-account-manager.mdc`

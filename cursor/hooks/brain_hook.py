@@ -14,6 +14,24 @@ except ImportError:
     from urllib import urlencode
     from urllib2 import Request, urlopen
 
+RULES = os.path.join(os.path.expanduser("~"), ".cursor", "rules")
+# 问推广时必须先读完的角色。模型不读，preToolUse 会拒绝其他工具。
+PROMO_RE = re.compile(u"推广|引流|获客|私域|收录|怎么推|找到我")
+PROMO_ROLES = (
+    "growth-hacker.mdc",
+    "baidu-seo-specialist.mdc",
+    "private-domain-operator.mdc",
+)
+EXTRA_ROLES = (
+    (u"抖音", "douyin-strategist.mdc"),
+    (u"小红书", "xiaohongshu-specialist.mdc"),
+    (u"公众号", "wechat-official-account-manager.mdc"),
+    (u"淘宝", "china-e-commerce-operator.mdc"),
+    (u"京东", "china-e-commerce-operator.mdc"),
+    (u"拼多多", "china-e-commerce-operator.mdc"),
+    (u"上架", "china-e-commerce-operator.mdc"),
+)
+
 BRAIN = os.environ.get("BRAIN_HOME", r"C:\benji\brain")
 BASE = os.environ.get("BRAIN_URL", "http://127.0.0.1:18099").rstrip("/")
 SESSION_DIR = os.path.join(BRAIN, "data", "sessions")
@@ -147,6 +165,21 @@ def on_start(payload):
     emit({"additional_context": (text + "\n" + extra).strip()})
 
 
+def promo_roles(prompt):
+    if not isinstance(prompt, str) or not PROMO_RE.search(prompt):
+        return []
+    names = list(PROMO_ROLES)
+    for word, filename in EXTRA_ROLES:
+        if word in prompt and filename not in names:
+            names.append(filename)
+    paths = []
+    for name in names:
+        path = os.path.join(RULES, name)
+        if os.path.isfile(path):
+            paths.append(path)
+    return paths
+
+
 def on_prompt(payload):
     sid = session_id(payload) or current_id() or "session"
     prompt = payload.get("prompt") or payload.get("text") or ""
@@ -154,9 +187,50 @@ def on_prompt(payload):
         state = load_state(sid)
         state["prompts"].append(clip(prompt, 1500))
         state["prompts"] = state["prompts"][-30:]
+        roles = promo_roles(prompt)
+        if roles:
+            state["pending_roles"] = roles
         save_state(state)
         set_current(sid)
     emit({"continue": True})
+
+
+def tool_path(tool_input):
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("path", "file_path", "target_file", "file"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def on_pre_tool(payload):
+    sid = session_id(payload) or current_id()
+    if not sid:
+        emit({"permission": "allow"})
+        return
+    state = load_state(sid)
+    pending = [path for path in (state.get("pending_roles") or []) if os.path.isfile(path)]
+    if not pending:
+        emit({"permission": "allow"})
+        return
+    raw = tool_path(payload.get("tool_input") or {})
+    folded = raw.replace("/", "\\").lower()
+    kept = []
+    for path in pending:
+        if os.path.basename(path).lower() in folded:
+            continue
+        kept.append(path)
+    state["pending_roles"] = kept
+    save_state(state)
+    if not kept or len(kept) < len(pending):
+        emit({"permission": "allow"})
+        return
+    emit({
+        "permission": "deny",
+        "agent_message": "这是推广、引流或获客问题。先用 Read 读完下面的角色全文，再查网站或写方案：\n" + "\n".join(kept),
+    })
 
 
 def on_response(payload):
@@ -201,6 +275,8 @@ def main():
             on_start(payload)
         elif event == "prompt":
             on_prompt(payload)
+        elif event == "preTool":
+            on_pre_tool(payload)
         elif event == "response":
             on_response(payload)
         elif event == "stop":
@@ -211,6 +287,8 @@ def main():
         log(event + " error: " + str(exc))
         if event == "prompt":
             emit({"continue": True})
+        elif event == "preTool":
+            emit({"permission": "allow"})
         else:
             emit({})
     return 0
