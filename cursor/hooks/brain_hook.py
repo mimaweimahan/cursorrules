@@ -52,7 +52,7 @@ def log(msg):
         if not os.path.isdir(os.path.join(BRAIN, "data")):
             os.makedirs(os.path.join(BRAIN, "data"))
         with open(os.path.join(BRAIN, "data", "hook.log"), "a", encoding="utf-8") as handle:
-            handle.write(msg + "\n")
+            handle.write(clean(msg) + "\n")
     except Exception:
         pass
 
@@ -140,8 +140,19 @@ def save_state(state):
         json.dump(state, handle, ensure_ascii=False)
 
 
+def clean(text):
+    """去掉无法写入 UTF-8 的半个代理对，否则整段提问存不下来，拦截也不会生效。"""
+    if not isinstance(text, str):
+        return ""
+    try:
+        text.encode("utf-8")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def clip(text, limit):
-    text = redact(text).strip()
+    text = redact(clean(text)).strip()
     if len(text) > limit:
         return text[:limit]
     return text
@@ -166,7 +177,8 @@ def on_start(payload):
 
 
 def promo_roles(prompt):
-    if not isinstance(prompt, str) or not PROMO_RE.search(prompt):
+    prompt = clean(prompt)
+    if not prompt or not PROMO_RE.search(prompt):
         return []
     names = list(PROMO_ROLES)
     for word, filename in EXTRA_ROLES:
