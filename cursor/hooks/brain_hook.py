@@ -58,11 +58,13 @@ def log(msg):
 
 
 def read_input():
-    raw = sys.stdin.read()
-    if not raw.strip():
+    # Cursor 传入的是 UTF-8。Windows 上 sys.stdin.read() 会按 GBK 解码，中文关键词会坏掉。
+    stream = getattr(sys.stdin, "buffer", None)
+    raw = stream.read() if stream is not None else sys.stdin.read().encode("utf-8", "replace")
+    if not raw or not raw.strip():
         return {}
     try:
-        return json.loads(raw)
+        return json.loads(raw.decode("utf-8"))
     except Exception:
         return {}
 
