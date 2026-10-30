@@ -141,6 +141,7 @@ def on_start(payload):
         text = "大脑暂时连不上（%s）。有仓库就执行：python C:\\benji\\brain\\sync_cursorrules.py pull" % exc
     extra = (
         "永久记忆在本机大脑。上面是已有常识。本场会话结束会自动写入，不要把密钥写进记忆。"
+        "开头若有已沉淀的抉择，直接照做，不必重新比较角色。"
         "用户说「脑同步」时先 pull 再 push。"
     )
     emit({"additional_context": (text + "\n" + extra).strip()})

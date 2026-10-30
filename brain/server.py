@@ -44,6 +44,17 @@ KINDS = (
     "route",
 )
 
+# 同一类说法反复出现，就沉淀成固定抉择。hits 到阈值后会话开头直接给出，不再重比。
+HABIT_CUES = (
+    ("查旧事", "大脑", "问以前做过、换电脑或脑同步时，直接查本机大脑。", ("大脑", "换电脑", "脑同步")),
+    ("追接口", "ALE", "追接口、路径和字段时，先出链路快照再改。", ("接口", "链路")),
+    ("改界面", "前端角色", "改页面和前端时，直接按前端角色做。", ("前端", "页面")),
+    ("动现网", "先回忆再动机器", "部署和现网机器先回忆上次结论，再执行。", ("部署", "现网")),
+    ("选角色", "已沉淀的角色", "选专家角色时，已沉淀的直接用，其余才按简介自动挑。", ("角色",)),
+)
+HABIT_SETTLED = 3
+
+
 HANDS = {
     "cursor": "改代码、读仓库、Cursor Agent",
     "openclaw": "Telegram / 远程工作区对话与执行",
@@ -112,6 +123,13 @@ def init_db(conn):
         CREATE TRIGGER IF NOT EXISTS memories_vec_ad AFTER DELETE ON memories BEGIN
             DELETE FROM memory_vec WHERE id=old.id;
         END;
+        CREATE TABLE IF NOT EXISTS habits (
+            cue TEXT PRIMARY KEY,
+            choice TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            hits INTEGER DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS skills (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
@@ -125,6 +143,7 @@ def init_db(conn):
     )
     conn.commit()
     seed_skills(conn)
+    ensure_habits(conn)
     ensure_vectors(conn)
 
 
@@ -404,6 +423,93 @@ def upsert_memory(conn, kind, title, body, source, salience=1.0, tags=""):
     })
 
 
+def habit_matches(text, words):
+    raw = text or ""
+    folded = raw.lower()
+    for word in words:
+        if word.lower() in folded or word in raw:
+            return True
+    return False
+
+
+def count_habit_memories(conn, words):
+    clauses = []
+    args = []
+    for word in words:
+        clauses.append("(title LIKE ? OR body LIKE ?)")
+        like = "%" + word + "%"
+        args.extend([like, like])
+    sql = "SELECT COUNT(*) AS c FROM memories WHERE " + " OR ".join(clauses)
+    return conn.execute(sql, args).fetchone()["c"]
+
+
+def write_habit_memory(conn, cue, choice, detail, hits):
+    if hits < HABIT_SETTLED:
+        return
+    upsert_memory(
+        conn,
+        "decision",
+        "习惯：%s直接用%s" % (cue, choice),
+        "习惯已沉淀（%d次）：%s所以下次遇到这类事直接照做，不必重新比较。" % (hits, detail),
+        "habit:" + cue,
+        salience=4.0,
+        tags="habit",
+    )
+
+
+def ensure_habits(conn):
+    for cue, choice, detail, words in HABIT_CUES:
+        row = conn.execute("SELECT hits FROM habits WHERE cue=?", (cue,)).fetchone()
+        if row:
+            continue
+        hits = count_habit_memories(conn, words)
+        conn.execute(
+            "INSERT INTO habits(cue, choice, detail, hits, updated_at) VALUES (?,?,?,?,?)",
+            (cue, choice, detail, hits, now_iso()),
+        )
+        conn.commit()
+        write_habit_memory(conn, cue, choice, detail, hits)
+
+
+def observe_habits(conn, text):
+    """一场会话的原话命中某类说法，就给这条习惯加一次。"""
+    if not text:
+        return []
+    touched = []
+    for cue, choice, detail, words in HABIT_CUES:
+        if not habit_matches(text, words):
+            continue
+        conn.execute(
+            "UPDATE habits SET hits=hits+1, choice=?, detail=?, updated_at=? WHERE cue=?",
+            (choice, detail, now_iso(), cue),
+        )
+        conn.commit()
+        row = conn.execute("SELECT hits FROM habits WHERE cue=?", (cue,)).fetchone()
+        hits = row["hits"] if row else 0
+        write_habit_memory(conn, cue, choice, detail, hits)
+        touched.append({"cue": cue, "choice": choice, "hits": hits})
+    return touched
+
+
+def settled_habits(conn, task=""):
+    rows = conn.execute(
+        "SELECT * FROM habits WHERE hits>=? ORDER BY hits DESC, cue",
+        (HABIT_SETTLED,),
+    ).fetchall()
+    if not task:
+        return rows[:5]
+    matched = []
+    for row in rows:
+        words = ()
+        for cue, _choice, _detail, cue_words in HABIT_CUES:
+            if cue == row["cue"]:
+                words = cue_words
+                break
+        if habit_matches(task, words):
+            matched.append(row)
+    return matched
+
+
 def record_session(conn, payload):
     """一场会话的原文档案，外加一条可复用短句。同一 session 反复调用会覆盖，不堆重复。"""
     sid = (payload.get("session_id") or "").strip() or "unknown"
@@ -440,7 +546,13 @@ def record_session(conn, payload):
             salience=2.0,
             tags="distill",
         )
-    return {"ok": True, "episode_id": episode["id"], "distill_id": distilled["id"] if distilled else None}
+    habits = observe_habits(conn, prompts[0] if prompts else "")
+    return {
+        "ok": True,
+        "episode_id": episode["id"],
+        "distill_id": distilled["id"] if distilled else None,
+        "habits": habits,
+    }
 
 
 def remember(conn, payload):
@@ -592,15 +704,21 @@ def context_pack(conn, task, limit=6):
         memories = recall(conn, task, limit=limit, kind="common_sense")
     routed = route(conn, task, limit=3)
     lines = ["[BRAIN CONTEXT]", "任务: " + (task or "(无)")]
+    settled = settled_habits(conn, task)
+    if settled:
+        lines.append("已沉淀的抉择（直接照做，不必重新比较）:")
+        for habit in settled:
+            lines.append("- %s → %s（%d次）%s" % (habit["cue"], habit["choice"], habit["hits"], habit["detail"]))
     if routed["hands"]:
         lines.append("建议调用:")
         for hand in routed["hands"]:
             lines.append(
                 "- %s / %s：%s" % (hand["hand"], hand["name"], hand["how"][:160])
             )
-    if memories:
+    shown = [mem for mem in memories if not (mem.get("source") or "").startswith("habit:")]
+    if shown:
         lines.append("相关记忆:")
-        for mem in memories:
+        for mem in shown:
             lines.append("- [%s] %s — %s" % (mem["kind"], mem["title"], mem["body"][:220]))
     else:
         lines.append("相关记忆: （空，这是新问题，做完后 remember）")
