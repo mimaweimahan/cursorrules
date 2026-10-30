@@ -1,0 +1,14 @@
+---
+description: 推广、获客、被搜到时先读对应角色全文
+alwaysApply: true
+---
+
+# 推广先读角色
+
+用户要推广、引流、获客、让客户找到、SEO、上架或私域时，先读 `%USERPROFILE%\.cursor\rules\` 里对应的 `.mdc` 全文，再写方案。不要把「没调用子代理」当成没使用这些角色。
+
+- 引进来：`growth-hacker.mdc`、`offer-lead-gen-strategist.mdc`、`private-domain-operator.mdc`
+- 被搜到、内容推出去：`baidu-seo-specialist.mdc`、`douyin-strategist.mdc`、`xiaohongshu-specialist.mdc`、`wechat-official-account-manager.mdc`
+- 货架推出：`china-e-commerce-operator.mdc`
+
+只读和当前任务对得上的，不要一次读完。
