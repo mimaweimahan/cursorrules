@@ -42,7 +42,6 @@
     "git.openRepositoryInParentFolders": "never",
     "php.validate.executablePath": "",
     "cursor.windowSwitcher.sidebarHoverCollapsed": true,
-    "cursor.general.disableHttp2": true,
     "files.autoSave": "afterDelay",
     "terminal.integrated.suggest.windowsExecutableExtensions": {
         
