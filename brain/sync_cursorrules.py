@@ -273,8 +273,76 @@ def commit_and_push():
     ensure_daily_task()
 
 
+def load_vps_tunnel_env():
+    """计划任务没有交互环境变量时，从 data/vps_tunnel.env 读凭据（该文件已被 data/* 忽略）。"""
+    path = os.path.join(BRAIN, "data", "vps_tunnel.env")
+    if not os.path.isfile(path):
+        return False
+    loaded = 0
+    with open(path, "r") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip().strip("'").strip('"')
+            if key:
+                os.environ[key] = val
+                loaded += 1
+    log("loaded vps_tunnel.env keys=%s" % loaded)
+    return loaded > 0
+
+
+def fetch_primary_db_from_vps():
+    """主库在 VPS 时，push 前把 /var/lib/brain/brain.db 拉回本机再备份。"""
+    load_vps_tunnel_env()
+    password = os.environ.get("VPS_SSH_PASSWORD")
+    if not password:
+        log("skip VPS db fetch: VPS_SSH_PASSWORD not set (and no usable vps_tunnel.env)")
+        return False
+    try:
+        import paramiko
+    except ImportError:
+        log("skip VPS db fetch: paramiko missing")
+        return False
+    host = os.environ.get("VPS_HOST", "72.62.244.212")
+    port = int(os.environ.get("VPS_PORT", "22456"))
+    user = os.environ.get("VPS_USER", "root")
+    remote_db = "/var/lib/brain/brain.db"
+    local_db = os.path.join(BRAIN, "data", "brain.db")
+    folder = os.path.dirname(local_db)
+    if not os.path.isdir(folder):
+        os.makedirs(folder)
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(
+        host, port=port, username=user, password=password,
+        timeout=45, allow_agent=False, look_for_keys=False,
+    )
+    try:
+        sftp = client.open_sftp()
+        sftp.get(remote_db, local_db)
+        sftp.close()
+    finally:
+        client.close()
+    log("fetched primary brain.db from VPS")
+    return True
+
+
 def push():
     ensure_repo()
+    # 单脑在 VPS：没有拉到主库就禁止用本机旧 db 顶上去
+    primary_remote = (
+        os.environ.get("BRAIN_PRIMARY", "remote").strip().lower() in ("remote", "vps")
+        or os.path.isfile(os.path.join(BRAIN, "data", "vps_tunnel.env"))
+    )
+    fetched = fetch_primary_db_from_vps()
+    if primary_remote and not fetched:
+        raise RuntimeError(
+            "refuse push: primary brain is on VPS but failed to fetch brain.db "
+            "(check data/vps_tunnel.env and SSH)"
+        )
     export_bundle()
     scan_secrets()
     commit_and_push()

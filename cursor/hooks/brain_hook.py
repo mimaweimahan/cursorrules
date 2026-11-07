@@ -124,14 +124,15 @@ def state_path(sid):
 def load_state(sid):
     path = state_path(sid)
     if not os.path.isfile(path):
-        return {"id": sid, "prompts": [], "responses": []}
+        return {"id": sid, "prompts": [], "responses": [], "tool_calls": []}
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
     except Exception:
-        data = {"id": sid, "prompts": [], "responses": []}
+        data = {"id": sid, "prompts": [], "responses": [], "tool_calls": []}
     data.setdefault("prompts", [])
     data.setdefault("responses", [])
+    data.setdefault("tool_calls", [])
     return data
 
 
@@ -163,7 +164,7 @@ def clip(text, limit):
 def on_start(payload):
     sid = session_id(payload) or "session"
     set_current(sid)
-    save_state({"id": sid, "prompts": [], "responses": []})
+    save_state({"id": sid, "prompts": [], "responses": [], "tool_calls": []})
     text = ""
     try:
         pack = http_json("GET", "/v1/context?" + urlencode({"task": "", "limit": "4"}))
@@ -253,12 +254,68 @@ def tool_path(tool_input):
     return ""
 
 
+def record_tool(state, payload):
+    """凡调用必记，供 SessionCase 工具清单。"""
+    name = payload.get("tool_name") or payload.get("tool") or payload.get("name") or "unknown"
+    if not isinstance(name, str):
+        name = "unknown"
+    inp = payload.get("tool_input") or payload.get("input") or payload.get("arguments") or {}
+    if isinstance(inp, str):
+        try:
+            inp = json.loads(inp)
+        except Exception:
+            inp = {"raw": clip(inp, 200)}
+    if not isinstance(inp, dict):
+        inp = {"raw": clip(str(inp), 200)}
+    digest_parts = []
+    for key in ("command", "path", "file_path", "pattern", "query", "namespace", "toolName", "tool"):
+        if key in inp and inp[key] is not None:
+            digest_parts.append("%s=%s" % (key, clip(str(inp[key]), 80)))
+    args_digest = "; ".join(digest_parts) if digest_parts else clip(json.dumps(inp, ensure_ascii=False), 120)
+    category = "other"
+    lname = name.lower()
+    if name in ("Shell", "Bash") or "shell" in lname:
+        category = "shell_cli"
+    elif name in ("Read",):
+        category = "editor_read"
+    elif name in ("Write", "StrReplace", "Delete", "EditNotebook"):
+        category = "editor_write"
+    elif name in ("Glob", "Grep", "SemanticSearch"):
+        category = "search"
+    elif "mcp" in lname or name in ("CallDynamicTool", "GetDynamicTools") or inp.get("namespace"):
+        category = "mcp"
+    elif name.startswith("browser_") or "Browser" in name:
+        category = "browser"
+    elif name.startswith("computer_"):
+        category = "computer_use"
+    elif name == "Task":
+        category = "subagent"
+    entry = {
+        "tool_call_id": "hook_%s" % (len(state.get("tool_calls") or []) + 1),
+        "name": name,
+        "category": category,
+        "args_digest": args_digest,
+        "result_status": "unknown",
+        "provider": "cursor_builtin",
+        "mcp_namespace": inp.get("namespace") if isinstance(inp.get("namespace"), str) else None,
+        "mcp_tool": inp.get("toolName") or inp.get("tool"),
+        "raw_ref": "hook:preTool",
+    }
+    state.setdefault("tool_calls", []).append(entry)
+    state["tool_calls"] = state["tool_calls"][-200:]
+
+
 def on_pre_tool(payload):
     sid = session_id(payload) or current_id()
     if not sid:
         emit({"permission": "allow"})
         return
     state = load_state(sid)
+    try:
+        record_tool(state, payload)
+        save_state(state)
+    except Exception as exc:
+        log("record_tool failed: " + str(exc))
     pending = [path for path in (state.get("pending_roles") or []) if os.path.isfile(path)]
     if not pending:
         emit({"permission": "allow"})
@@ -339,6 +396,21 @@ def on_stop(payload):
         }, timeout=15)
     except Exception as exc:
         log("stop failed: " + str(exc))
+    # SessionCase 整理器：失败不阻断
+    try:
+        sys.path.insert(0, BRAIN)
+        import session_case  # noqa: E402
+        runtime = "ssh_remote" if os.name != "nt" and os.path.isdir("/opt/brain") else "local_cursor"
+        result, _case = session_case.organize_and_publish(state, runtime=runtime)
+        log("session_case: %s" % json.dumps({
+            "ok": result.get("ok"),
+            "case_id": result.get("case_id"),
+            "status": result.get("status"),
+            "completeness": result.get("completeness"),
+            "written": len(result.get("written") or []),
+        }, ensure_ascii=False))
+    except Exception as exc:
+        log("session_case failed: " + str(exc))
     emit({})
 
 

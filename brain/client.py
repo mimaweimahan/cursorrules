@@ -32,7 +32,7 @@ def _health_once():
 
 
 def ensure_server():
-    """连不上就拉起 brain/server.py，等到 /health 再返回。同一进程只尝试启动一次。"""
+    """连不上时：主库在 VPS 则禁止拉起本机第二脑；仅非 primary-remote 时才本地拉起。"""
     global _START_TRIED
     try:
         data = _health_once()
@@ -40,6 +40,13 @@ def ensure_server():
             return True
     except (HTTPError, URLError, ValueError, OSError):
         pass
+    # 单脑模式：本机只当客户端（隧道/Tailscale），绝不再起本地 server
+    if os.environ.get("BRAIN_PRIMARY", "remote").strip().lower() in ("remote", "vps"):
+        sys.stderr.write(
+            "大脑连不上 %s。主库在 VPS：请先跑 tunnel_to_primary.py 或接通 Tailscale，不要起本机 server。\n"
+            % DEFAULT_URL
+        )
+        return False
     if _START_TRIED:
         return False
     _START_TRIED = True

@@ -1,39 +1,43 @@
 ---
-description: 换电脑或换项目时去磁盘上的大脑要记忆，不要只翻 Cursor 聊天
+description: 唯一大脑在 VPS；任何地方的对话都必须写入该大脑
 alwaysApply: true
 ---
 
 # 大脑在哪
 
-记忆在磁盘上，不在 Cursor 账号里。接口是 `http://127.0.0.1:18099`，目录是 `C:\benji\brain\`（库文件 `data\brain.db`）。模糊说法走向量索引，路径、IP、文件名仍走全文。向量由原文重建。本机有 `C:\benji\brain\models\bge-small-zh-v1.5` 时用句向量，没有就退回词向量。模型不进仓库，新机器需要时运行 `python C:\benji\brain\fetch_embed.py`。
+**唯一运行时主库在 VPS `ayang.hou`：`/var/lib/brain/brain.db`，进程只听 `127.0.0.1:18099`。**
 
-用户钩子 `%USERPROFILE%\.cursor\hooks.json` 会在每场会话开始时注入已有记忆，并在回合结束时把原文写入大脑、蒸馏成一条短句。同一类说法反复出现后，会沉淀成固定抉择，会话开头直接给出。新机器 `pull` 时会把这份钩子装回去。
+## 强制：对话必须进大脑
 
-涉及「以前做过 / 现网怎么配 / 踩过什么坑 / 该用哪个工具」时，先：
+**不管在哪里用（本机 Cursor、SSH Remote、OpenClaw、别的电脑、别的 agent），本场对话的内容与执行结果都必须进入上述唯一大脑。禁止只留在聊天窗口。**
+
+| 必须进脑 | 怎么进 |
+|----------|--------|
+| 用户要求、反复强调、纠错 | 钩子 `session` / SessionCase；或结束前 `remember` |
+| 做了什么、用了哪些工具/CLI/MCP、结果如何 | `preTool` + stop 整理器；缺钩子则手动整理 |
+| 可复用结论 / 坑 / 决策 | `remember --kind common_sense\|pitfall\|decision` |
+
+硬约束：
+
+1. **写入口永远是同一 `BRAIN_URL`（本机经隧道 `127.0.0.1:18099`，VPS/Remote 本机回环同端口）。禁止起第二份 `server.py`/`keep.py`，禁止只写本地文件当「记忆」。**
+2. **有钩子就靠钩子**（`sessionStart` / `prompt` / `preTool` / `response` / `stop` → SessionCase）。钩子失败不拦截提问，但**本回合有实质结论时，agent 必须补一次 `remember`，不能假装已入库。**
+3. **无钩子环境（纯 SSH、别的 agent）**：结束前必须 `client.py remember` 或 `session_case.py organize`；不能以「不在 Cursor 里」为由跳过。
+4. **不要写密钥、密码、token、完整私钥**进大脑。
+5. 涉及「以前做过 / 现网 / 坑 / 选工具」时，先 `context` 再动手。
+
+访问方式（都打同一份库）：
+
+| 谁 | 怎么连 |
+|----|--------|
+| VPS 上 Cursor Remote / OpenClaw | `http://127.0.0.1:18099` |
+| 本机这台 Win（Tailscale userspace/DERP 不稳） | 计划任务 `BenjiBrainTunnel` 常驻 `keep_tunnel.py`；凭据在 `data\vps_tunnel.env`（勿提交）。接口仍是 `http://127.0.0.1:18099` |
+| 其它已入网且 TCP 正常的 Tailscale 设备 | `http://100.114.57.70:18099` |
+
+GitHub `cursorrules` 只做灾备。整理：`SESSION_CASE_SPEC.md` + `session_case.py`。
 
 ```
 python C:\benji\brain\client.py context --task "一句话任务"
-```
-
-连不上就运行 `python C:\benji\brain\keep.py`，不要假装有记忆。
-
-换了一台电脑，或本机没有 `C:\benji\brain\client.py`，或 `health` 失败：立刻执行信号命令 **脑同步**（先拉仓库里的大脑和配置，再启动）：
-
-```
-python C:\benji\brain\sync_cursorrules.py pull
-```
-
-仓库还没在本机时：
-
-```
-git clone git@github.com:mimaweimahan/cursorrules.git C:\benji\cursorrules
-python C:\benji\cursorrules\brain\sync_cursorrules.py pull
-```
-
-每天 23:50 计划任务 `BenjiBrainSync` 会把大脑、Cursor 配置和桌面上的 `.code-profile` 推回该仓库。用户说「脑同步」时：先 pull，再 push。不同账号则先把仓库里的 `cursor/user-rules` 放进 `%USERPROFILE%\.cursor\rules`，再用 Cursor 的 Profiles: Import 导入 `C:\benji\cursor-profiles` 里的 `.code-profile`，然后说「脑同步」。
-
-结束时把还能复用的短句写回去（不要写密钥）：
-
-```
 python C:\benji\brain\client.py remember --kind common_sense --title "短标题" --body "常识：……所以下次……" --source "本会话" --salience 3
 ```
+
+连不上：先看隧道；**不要**启动本机 `keep.py`/`server.py`。用户说「脑同步」：先 pull 再 push。

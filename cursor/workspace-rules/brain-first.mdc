@@ -1,44 +1,43 @@
 ---
-description: 跨会话永久记忆：先问大脑再动手，结束时把结论写回
+description: 唯一大脑在 VPS；任何地方的对话都必须写入该大脑
 alwaysApply: true
 ---
 
-# 大脑优先
+# 大脑在哪
 
-用户要的是**关电脑、删软件也不丢**的记忆。本机大脑：`C:\benji\brain\`，默认 `http://127.0.0.1:18099`。
+**唯一运行时主库在 VPS `ayang.hou`：`/var/lib/brain/brain.db`，进程只听 `127.0.0.1:18099`。**
 
-换电脑或本机没有大脑时，不要找 Cursor 账号。信号命令是 **脑同步**：
+## 强制：对话必须进大脑
 
-```
-python C:\benji\brain\sync_cursorrules.py pull
-```
+**不管在哪里用（本机 Cursor、SSH Remote、OpenClaw、别的电脑、别的 agent），本场对话的内容与执行结果都必须进入上述唯一大脑。禁止只留在聊天窗口。**
 
-仓库：`git@github.com:mimaweimahan/cursorrules.git`（目录 `C:\benji\cursorrules`）。每天 23:50 任务 `BenjiBrainSync` 推送大脑和 Cursor 配置。用户说「脑同步」时先 pull 再 push。
+| 必须进脑 | 怎么进 |
+|----------|--------|
+| 用户要求、反复强调、纠错 | 钩子 `session` / SessionCase；或结束前 `remember` |
+| 做了什么、用了哪些工具/CLI/MCP、结果如何 | `preTool` + stop 整理器；缺钩子则手动整理 |
+| 可复用结论 / 坑 / 决策 | `remember --kind common_sense\|pitfall\|decision` |
 
-## 何时必须问
+硬约束：
 
-涉及「以前做过 / 现网怎么配 / 踩过什么坑 / 该用哪个工具」时，先：
+1. **写入口永远是同一 `BRAIN_URL`（本机经隧道 `127.0.0.1:18099`，VPS/Remote 本机回环同端口）。禁止起第二份 `server.py`/`keep.py`，禁止只写本地文件当「记忆」。**
+2. **有钩子就靠钩子**（`sessionStart` / `prompt` / `preTool` / `response` / `stop` → SessionCase）。钩子失败不拦截提问，但**本回合有实质结论时，agent 必须补一次 `remember`，不能假装已入库。**
+3. **无钩子环境（纯 SSH、别的 agent）**：结束前必须 `client.py remember` 或 `session_case.py organize`；不能以「不在 Cursor 里」为由跳过。
+4. **不要写密钥、密码、token、完整私钥**进大脑。
+5. 涉及「以前做过 / 现网 / 坑 / 选工具」时，先 `context` 再动手。
+
+访问方式（都打同一份库）：
+
+| 谁 | 怎么连 |
+|----|--------|
+| VPS 上 Cursor Remote / OpenClaw | `http://127.0.0.1:18099` |
+| 本机这台 Win（Tailscale userspace/DERP 不稳） | 计划任务 `BenjiBrainTunnel` 常驻 `keep_tunnel.py`；凭据在 `data\vps_tunnel.env`（勿提交）。接口仍是 `http://127.0.0.1:18099` |
+| 其它已入网且 TCP 正常的 Tailscale 设备 | `http://100.114.57.70:18099` |
+
+GitHub `cursorrules` 只做灾备。整理：`SESSION_CASE_SPEC.md` + `session_case.py`。
 
 ```
 python C:\benji\brain\client.py context --task "一句话任务"
-```
-
-连不上就启动 `python C:\benji\brain\server.py`，不要假装有记忆。
-
-## 结束时必须写成常识
-
-对话过程丢掉。只留下**下次还能当常识用的短句**（可执行、可复述、不含密钥）：
-
-```
 python C:\benji\brain\client.py remember --kind common_sense --title "短标题" --body "常识：……所以下次……" --source "本会话" --salience 3
 ```
 
-批量从 Cursor 历史提炼：`python C:\benji\brain\distill_commons.py`
-
-`kind`：常识用 `common_sense`；坑用 `pitfall`；架构决策用 `decision`。
-
-## 路由
-
-`python C:\benji\brain\client.py route "意图"` 给出用手还是用脚（cursor / openclaw / graphify / ale / shell）。成功后可 `success "技能名"` 给这条技能加分。
-
-读代码仍遵守 codebase-memory 规则；接口链路仍走 ALE。大脑管的是**人生记忆与工具选择**，不是 AST。
+连不上：先看隧道；**不要**启动本机 `keep.py`/`server.py`。用户说「脑同步」：先 pull 再 push。

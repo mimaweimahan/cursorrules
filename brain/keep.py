@@ -115,6 +115,12 @@ def healthy():
 
 
 def main():
+    # 单脑在 VPS：禁止本机 keep 再拉 server.py（会占 18099 让隧道狂重启）
+    env_primary = os.environ.get("BRAIN_PRIMARY", "remote").strip().lower()
+    tunnel_env = os.path.join(LOG_DIR, "vps_tunnel.env")
+    if env_primary in ("remote", "vps") or os.path.isfile(tunnel_env):
+        log("refusing start: primary is VPS; use keep_tunnel.py (BRAIN_PRIMARY=%s)" % env_primary)
+        return 0
     lock = hold_lock()
     if lock is None and msvcrt is not None:
         return 0
