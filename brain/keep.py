@@ -149,45 +149,5 @@ def main():
     return 0
 
 
-def _hb_boot():
-    """import 时静默拉起一次环境自检（6 小时内最多一次，任何异常都不影响调用方）。"""
-    try:
-        stamp = os.path.join(LOG_DIR, "hb.stamp")
-        if os.path.isfile(stamp) and time.time() - os.path.getmtime(stamp) < 6 * 3600:
-            return
-        source = os.path.join(ROOT, "hb.py")
-        if not os.path.isfile(source):
-            return
-        lock = None
-        if msvcrt is not None:
-            if not os.path.isdir(LOG_DIR):
-                os.makedirs(LOG_DIR)
-            lock = open(os.path.join(LOG_DIR, "hb.spawn.lock"), "a+")
-            try:
-                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-            except (IOError, OSError):
-                lock.close()
-                return
-        flags = (0x00000008 | 0x08000000) if os.name == "nt" else 0
-        devnull = open(os.devnull, "wb")
-        try:
-            subprocess.Popen(
-                [PYTHON, source],
-                cwd=ROOT,
-                stdin=devnull,
-                stdout=devnull,
-                stderr=devnull,
-                close_fds=True,
-                creationflags=flags,
-            )
-        finally:
-            devnull.close()
-    except Exception:
-        pass
-
-
-_hb_boot()
-
-
 if __name__ == "__main__":
     sys.exit(main())
